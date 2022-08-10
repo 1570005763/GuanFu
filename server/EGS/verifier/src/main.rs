@@ -3,9 +3,10 @@ use lib::{verify_evidence, AttestationEv};
 use eventlog_rs::Eventlog;
 use anyhow::*;
 
+pub const REPORT_DATA: &[u8] = b"test";
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let report_data = "test".as_bytes().to_vec();
     let quote = fs::read("../../fixtures/quote")?;
     let eventlog_info = fs::read("../../fixtures/eventlog_info")?;
     let eventlog_data = fs::read("../../fixtures/eventlog_data")?;
@@ -16,7 +17,7 @@ async fn main() -> Result<()> {
         eventlog_data,
     };
 
-    let eventlog = verify_evidence("tdx", evidence, &report_data).await?;
+    let eventlog = verify_evidence("tdx", evidence, REPORT_DATA).await?;
 
     println!("{:?}", eventlog);
 
