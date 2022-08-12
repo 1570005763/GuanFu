@@ -11,3 +11,4 @@ eventlog-rs = {git = "https://github.com/inclavare-containers/eventlog-rs"}
 anyhow = "1.0"
 serde_json = "1.0.81"
 serde = { version = "1.0.137", features = [ "derive" ] }
+base64 = "0.13.0"
