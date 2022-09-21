@@ -8,6 +8,10 @@
 #[cfg(feature = "in-toto")]
 pub mod in_toto;
 
+//add guanfu
+#[cfg(feature = "guanfu")]
+pub mod guanfu;
+
 use anyhow::*;
 use std::collections::HashMap;
 
@@ -37,6 +41,14 @@ impl ExtractorModuleList {
                 Box::new(|| -> ExtractorInstance { Box::new(in_toto::InTotoExtractor::new()) });
             mod_list.insert("in-toto".to_string(), instantiate_func);
         }
+        #[cfg(feature = "guanfu")]
+        {
+            let instantiate_func: ExtractorInstantiateFunc = Box::new(|| -> ExtractorInstance {
+                Box::new(guanfu::GuanFuExtractor::new()) });
+            mod_list.insert("guanfu".to_string(), instantiate_func);
+        }
+
+
 
         ExtractorModuleList { mod_list }
     }

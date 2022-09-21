@@ -21,7 +21,7 @@ in-toto = { git = "https://github.com/in-toto/in-toto-rs", rev = "c577f62" }
 default = [ "full" ]
 full = [ "in-toto" ]
 in-toto = []
-
+guanfu = []
 [dev-dependencies]
 testing_logger = "0.1.1"
 walkdir = "2.3.2"
