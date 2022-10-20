@@ -1,5 +1,0 @@
-timer_create returned 0
-NONPORTABLE created timerid 0x602260
-counter=0
-Received signal 26
- siginfo_t fields: signo:26 errno:0 code:-6 overrun:0 timerid:1
