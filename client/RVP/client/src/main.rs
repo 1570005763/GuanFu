@@ -1,7 +1,7 @@
 //! rvps's client
 
-use clap::Parser;
 use anyhow::*;
+use clap::Parser;
 
 use control::process_provenance_client::ProcessProvenanceClient;
 use control::ProvenanceReq;
@@ -19,7 +19,6 @@ struct Args {
     #[clap(short, long, value_parser)]
     path: String,
 }
-
 
 async fn real_main() -> Result<String> {
     let args = Args::parse();

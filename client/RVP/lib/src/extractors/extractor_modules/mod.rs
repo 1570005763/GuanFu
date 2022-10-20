@@ -43,12 +43,10 @@ impl ExtractorModuleList {
         }
         #[cfg(feature = "guanfu")]
         {
-            let instantiate_func: ExtractorInstantiateFunc = Box::new(|| -> ExtractorInstance {
-                Box::new(guanfu::GuanFuExtractor::new()) });
+            let instantiate_func: ExtractorInstantiateFunc =
+                Box::new(|| -> ExtractorInstance { Box::new(guanfu::GuanFuExtractor::new()) });
             mod_list.insert("guanfu".to_string(), instantiate_func);
         }
-
-
 
         ExtractorModuleList { mod_list }
     }

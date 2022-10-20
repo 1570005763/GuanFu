@@ -2,7 +2,7 @@
 FROM ubuntu:18.04
 
 ENV DEBIAN_FRONTEND=noninteractive
-
+ADD sources.list /etc/apt/
 RUN apt-get -qq update && apt-get install -y \
     clang++-6.0 \
     clang-6.0 \
@@ -33,7 +33,7 @@ RUN apt-get -qq update && apt-get install -y \
     strace \
     sudo \
     valgrind
-
+RUN apt-get install -y cmake
 RUN update-alternatives --install /usr/bin/clang clang /usr/bin/clang-6.0 60 \
     --slave /usr/bin/clang++ clang++ /usr/bin/clang++-6.0 \
     --slave /usr/bin/clang-cpp clang-cpp /usr/bin/clang-cpp-6.0 \
@@ -49,12 +49,14 @@ ARG BUILDID=0
 
 RUN make -j deb "BUILDID=${BUILDID}"
 
+RUN cd json && make json
 # STAGE 2:
 # Copy only the deployment files into the final image:
 FROM ubuntu:18.04
 RUN apt-get update -y && apt-get install -y python3 bsdmainutils dnsutils curl
-
+ADD sources.list /etc/apt/
 COPY --from=0 /code/*.deb /root/
+COPY --from=0 /code/json/share /home/rebuild
 RUN dpkg --install /root/*.deb
 WORKDIR /usr/share/dettrace/examples
 
