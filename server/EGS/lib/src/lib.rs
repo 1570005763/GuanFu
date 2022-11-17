@@ -48,11 +48,10 @@ pub async fn verify_evidence(
         return Err(anyhow!("Unsupported TEE type"));
     }
 
-    let parsed_claims = verify_quote(&evidence.quote, report_data, TeeType::TDX).await?;
+    let claims = verify_quote(&evidence.quote, report_data, TeeType::TDX).await?;
 
     let event_log = Eventlog::try_from(evidence.eventlog_data.clone())?;
     
-    let claims = serde_json::from_str::<serde_json::Value>(&parsed_claims)?;
     let mut rtmrs_from_quote: HashMap<u32, Vec<u8>> = HashMap::new();
 
     rtmrs_from_quote.insert(0 as u32, base64::decode(claims["rtmr0"].to_string())?);
