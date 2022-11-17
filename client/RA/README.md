@@ -31,3 +31,9 @@ occurs that Guanfu works.
 
 Finally, Attestation Client calls `verify_evidence()` to compare the
 reference value and the gathered evidence.
+
+## Launch AC
+
+```bash
+cargo run -- --as-addr <EGS-ADDR:PORT> --rvps-addr <RVPS-ADDR:PORT>
+```
