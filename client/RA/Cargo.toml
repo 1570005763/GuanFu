@@ -16,6 +16,7 @@ log = "0.4.17"
 reference-value-provider-service = { path = "../RVP/lib" }
 eventlog-rs = {git = "https://github.com/inclavare-containers/eventlog-rs"}
 lib = {path = "../../server/EGS/lib"}
+tracing = "0.1.31"
 
 [build-dependencies]
 tonic-build = "0.5"
