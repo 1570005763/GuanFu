@@ -45,5 +45,5 @@ pub fn verify(event_log: Eventlog, rv: ReferenceValue) -> Result<()> {
         }
     }
 
-    bail("Digest match failed!")
+    bail!("Digest match failed!")
 }

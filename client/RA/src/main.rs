@@ -7,7 +7,10 @@ use clap::Parser;
 use query::query_reference_value_client::QueryReferenceValueClient;
 use query::QueryReq;
 use reference_value_provider_service::ReferenceValue;
-use tracing::{debug, error, info};
+use tracing::{error, info};
+use tracing_subscriber::{
+    fmt::layer, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt, EnvFilter,
+};
 
 pub mod query {
     tonic::include_proto!("query");
@@ -42,7 +45,7 @@ async fn real_main() -> Result<()> {
     let filter_layer = EnvFilter::new(level_filter);
     tracing_subscriber::registry()
         .with(filter_layer)
-        .with(fmt::layer().with_writer(std::io::stderr))
+        .with(layer().with_writer(std::io::stderr))
         .init();
 
     info!(rvps_addr =? args.rvps_addr);
@@ -68,7 +71,7 @@ async fn real_main() -> Result<()> {
     let name = String::from(ARTIFACT_NAME);
     let query = QueryReq { name };
     let rv = match rv_client.query(query).await?.into_inner().reference_value {
-        None => return Err(anyhow!("No reference value find.")),
+        None => bail!("No reference value find."),
         Some(r) => serde_json::from_str::<ReferenceValue>(&r)?,
     };
 
