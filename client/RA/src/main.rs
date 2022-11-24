@@ -4,10 +4,10 @@ use anyhow::*;
 use attestation::remote_attestation_client::RemoteAttestationClient;
 use attestation::RemoteAttestationReq;
 use clap::Parser;
-use log::{error, info};
 use query::query_reference_value_client::QueryReferenceValueClient;
 use query::QueryReq;
 use reference_value_provider_service::ReferenceValue;
+use tracing::{debug, error, info};
 
 pub mod query {
     tonic::include_proto!("query");
@@ -29,13 +29,24 @@ struct Args {
 
     #[clap(short, long, value_parser)]
     as_addr: String,
+
+    #[clap(short, long)]
+    verbose: bool,
 }
 
 async fn real_main() -> Result<()> {
     let args = Args::parse();
 
-    println!("rvps addr: {}", args.rvps_addr);
-    println!("as addr: {}", args.as_addr);
+    // setup logging
+    let level_filter = if args.verbose { "debug" } else { "info" };
+    let filter_layer = EnvFilter::new(level_filter);
+    tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(fmt::layer().with_writer(std::io::stderr))
+        .init();
+
+    info!(rvps_addr =? args.rvps_addr);
+    info!(as_addr =? args.as_addr);
 
     let as_addr = args.as_addr;
     let rvps_addr = args.rvps_addr;

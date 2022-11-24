@@ -1,12 +1,12 @@
 //! verifier
 
-use anyhow::{anyhow, Result};
+use anyhow::*;
 use eventlog_rs::Eventlog;
 use lib::AttestationEv;
 use reference_value_provider_service::ReferenceValue;
 
-use std::fmt::Write;
 use std::collections::HashSet;
+use std::fmt::Write;
 
 pub const REPORT_DATA: &[u8] = b"";
 pub const TEE: &str = "tdx";
@@ -26,7 +26,8 @@ pub fn verify(event_log: Eventlog, rv: ReferenceValue) -> Result<()> {
         verified_digests.insert(hv.value().to_owned());
     }
 
-    let unverified_digests: Vec<String> = event_log.log
+    let unverified_digests: Vec<String> = event_log
+        .log
         .iter()
         .flat_map(|entry| &entry.digests)
         .map(|digest| {
@@ -37,12 +38,12 @@ pub fn verify(event_log: Eventlog, rv: ReferenceValue) -> Result<()> {
             dig_str
         })
         .collect();
-    
+
     for unv_dig in &unverified_digests {
         if verified_digests.contains(unv_dig) {
-            return Ok(())
+            return Ok(());
         }
     }
-    
-    Err(anyhow!("Digest match failed!"))
+
+    bail("Digest match failed!")
 }
