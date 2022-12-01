@@ -31,7 +31,6 @@ async fn main() -> Result<()> {
     let filter_layer = EnvFilter::new(level_filter);
     tracing_subscriber::registry()
         .with(filter_layer)
-        .with(fmt::layer().with_writer(std::io::stderr))
         .with(layer().with_writer(std::io::stderr))
         .init();
 
