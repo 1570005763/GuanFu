@@ -12,8 +12,6 @@ use std::net::SocketAddr;
 
 pub const REPORT_DATA: &[u8] = "12345678123456781234567812345678".as_bytes();
 
-pub const 
-
 pub mod attestation {
     tonic::include_proto!("attestation");
 }
