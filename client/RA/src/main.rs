@@ -7,6 +7,7 @@ use clap::Parser;
 use query::query_reference_value_client::QueryReferenceValueClient;
 use query::QueryReq;
 use reference_value_provider_service::ReferenceValue;
+use tokio::fs;
 use tracing::{error, info};
 use tracing_subscriber::{
     fmt::layer, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt, EnvFilter,
@@ -55,16 +56,27 @@ async fn real_main() -> Result<()> {
     let rvps_addr = args.rvps_addr;
 
     // get evidences
-    let mut as_client = RemoteAttestationClient::connect(as_addr).await?;
+    let mut as_client = RemoteAttestationClient::connect(as_addr).await;
+    println!("{:?}", as_client);
+
+    let mut as_client = as_client.unwrap();
     let query = RemoteAttestationReq {};
     let evi = as_client
         .get_attestation_evidence(query)
         .await?
         .into_inner()
         .status;
+    info!("get evidence done.");
+
+    // for debug
+    // println!("{}", evi);
+    // fs::write("./evi", &evi)
+    //         .await
+    //         .map_err(|e| tonic::Status::internal(format!("write evi failed: {}", e.to_string())))?;
 
     let evi = serde_json::from_str(&evi)?;
     let event_log = verifier::verify_evidence(verifier::TEE, evi, verifier::REPORT_DATA).await?;
+    info!("verify evidence done.");
 
     // get reference values
     let mut rv_client = QueryReferenceValueClient::connect(rvps_addr).await?;
@@ -74,9 +86,11 @@ async fn real_main() -> Result<()> {
         None => bail!("No reference value find."),
         Some(r) => serde_json::from_str::<ReferenceValue>(&r)?,
     };
+    info!("get reference values done.");
 
     verifier::verify(event_log, rv)?;
     // compare
+    info!("compare reference values done.");
 
     Ok(())
 }

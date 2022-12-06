@@ -8,7 +8,7 @@ use reference_value_provider_service::ReferenceValue;
 use std::collections::HashSet;
 use std::fmt::Write;
 
-pub const REPORT_DATA: &[u8] = b"";
+pub const REPORT_DATA: &[u8] = "12345678123456781234567812345678".as_bytes();
 pub const TEE: &str = "tdx";
 
 pub async fn verify_evidence(
