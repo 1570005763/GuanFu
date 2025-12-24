@@ -6,6 +6,7 @@
 - 构建输入（如 vendor 包、子仓库等）
 - 构建环境（系统包、工具版本）
 - 构建流程（各阶段命令）
+- 构建输出（产物文件列表及其校验信息）
 
 配合 `build-runner`（`run_build.py` + `build-runner.sh`），可以在 GitHub Actions 或其他 CI 中统一执行。
 
@@ -28,6 +29,17 @@ inputs:
     targetDir: "backend/vendor"
 
 environment:
+  variables:
+    - name: SOURCE_DATE_EPOCH
+      value: 1672531200
+    - name: LANG
+      value: C.UTF-8
+    - name: LC_ALL
+      value: C.UTF-8
+    - name: TZ
+      value: UTF-8
+    - name: RPM_BUILD_NCPUS
+      value: 1
   systemPackages:
     - name: "openssl-devel"
       version: "1.1.1k"
@@ -46,6 +58,12 @@ phases:
   build:
     commands:
       - cargo build --release --locked --manifest-path backend/Cargo.toml
+
+outputs:
+  - path: "/backend/target/release/my-rust-service"
+    sha256: "a1b2c3d4..."           # 可选，若提供则在构建完成后计算并验证文件哈希
+  - path: "/backend/Cargo.lock"
+    sha256: "e5f6g7h8..."          # 可选，若提供则在构建完成后计算并验证文件哈希
 ```
 
 字段说明：
@@ -113,6 +131,8 @@ inputs:
 ## `environment`：构建环境
 
 用于声明构建中需要的系统级依赖和工具版本。
+
+> 注意：systemPackages 列表中的包安装顺序与列表中的排列顺序一致，将按顺序逐个安装。
 
 ```yaml
 environment:
@@ -198,6 +218,36 @@ Runner 会按顺序执行阶段：
 2. `build`（如存在）
 
 每个阶段中的 `commands` 按顺序执行，一旦某条命令失败（返回非 0），整个构建终止。
+
+---
+
+## `outputs`：构建输出
+
+`outputs` 用于声明构建完成后需要输出的产物文件列表，以及可选的校验信息。
+
+结构：
+
+```yaml
+outputs:
+  - path: "backend/target/release/my-rust-service"
+    sha256: "a1b2c3d4..."           # 可选，若提供则在构建完成后计算并验证文件哈希
+  - path: "backend/Cargo.lock"
+    sha256: "e5f6g7h8..."          # 可选，若提供则在构建完成后计算并验证文件哈希
+```
+
+字段：
+
+- `path`：输出文件或目录的路径（相对于工作目录）。
+- `sha256`：可选，若提供，runner 会在构建完成后计算文件哈希并与该值比较。
+
+行为：
+
+- Runner 在所有构建阶段完成后，会：
+  - 检查指定路径的文件/目录是否存在
+  - 如有 `sha256`，则计算文件哈希并与提供的值进行比较
+  - 将输出文件/目录的信息记录到构建日志中，供后续流程使用
+
+在使用 `build-runner.sh` 脚本进行本地构建时，脚本会自动解析 `outputs` 部分，并将相应的目录挂载到容器中，确保构建产物能够正确地保存到宿主机上。
 
 ---
 

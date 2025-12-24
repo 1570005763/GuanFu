@@ -4,7 +4,7 @@ import sys
 import subprocess
 import shutil
 from typing import List
-from run_build import OsRunnerBase
+from .base_runner import OsRunnerBase
 
 
 class Anolis23Runner(OsRunnerBase):
@@ -56,8 +56,9 @@ class Anolis23Runner(OsRunnerBase):
             sys.exit(1)
 
         print(f"[build-runner] Installing system packages via {pkg_mgr}: {' '.join(packages)}")
-        # -y 非交互安装
-        subprocess.check_call(f"{pkg_mgr} install -y " + " ".join(packages), shell=True)
+        # -y 非交互安装，逐个安装包
+        for package in packages:
+            subprocess.check_call(f"{pkg_mgr} install -y {package}", shell=True)
 
     def install_node(self, version: str):
         """

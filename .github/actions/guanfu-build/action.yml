@@ -1,0 +1,36 @@
+name: "Container build runner"
+description: "Run build with container mode"
+inputs:
+  spec_path:
+    description: "Path to buildspec yaml"
+    required: false
+    default: "buildspec.yaml"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout project
+      uses: actions/checkout@v4
+      with:
+        repository: 1570005763/GuanFu
+        ref: update-workflow
+        path: GuanFu
+
+    - name: Setup Docker
+      uses: docker/setup-docker-action@v4
+
+    - name: Setup Python 3
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+
+    - name: Install PyYAML
+      shell: bash
+      run: |
+        python3 -m pip install --upgrade pip
+        python3 -m pip install PyYAML
+
+    - name: Run build with container mode
+      shell: bash
+      run: |
+        ./GuanFu/scripts/build-runner.sh "${{ inputs.spec_path }}"

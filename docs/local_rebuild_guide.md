@@ -25,4 +25,7 @@ GUANFU 提供了 `build-runner.sh` 脚本，默认以容器模式运行，即启
 
 脚本会：
 - 从 buildspec.yaml 文件中读取容器镜像配置
+- 解析 buildspec.yaml 中的 outputs 部分，将输出文件目录挂载到容器中
+- 将 buildspec.yaml 文件和 scripts 目录挂载到容器中
 - 启动相应的容器并在其中执行构建
+- 构建完成后，输出文件会自动保存到宿主机对应目录中
