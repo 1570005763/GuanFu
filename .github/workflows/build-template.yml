@@ -7,7 +7,7 @@ on:
       spec_path:
         description: "Path to buildspec yaml"
         required: false
-        default: ".buildspec.yaml"
+        default: "buildspec.yaml"
         type: string
 
 jobs:
