@@ -10,12 +10,6 @@ class OsRunnerBase:
     def install_system_packages(self, packages):
         raise NotImplementedError
 
-    def install_node(self, version: str):
-        raise NotImplementedError
-
-    def install_rust(self, version: str):
-        raise NotImplementedError
-
 
 class UnsupportedOsRunner(OsRunnerBase):
     """用于非实现 OS 的占位 Runner，直接报错"""
@@ -25,14 +19,6 @@ class UnsupportedOsRunner(OsRunnerBase):
 
     def install_system_packages(self, packages):
         print("[build-runner] System package installation not implemented for this OS.", file=sys.stderr)
-        sys.exit(1)
-
-    def install_node(self, version: str):
-        print("[build-runner] Node installation not implemented for this OS.", file=sys.stderr)
-        sys.exit(1)
-
-    def install_rust(self, version: str):
-        print("[build-runner] Rust installation not implemented for this OS.", file=sys.stderr)
         sys.exit(1)
 
 
