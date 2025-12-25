@@ -60,26 +60,3 @@ class Anolis23Runner(OsRunnerBase):
         for package in packages:
             subprocess.check_call(f"{pkg_mgr} install -y {package}", shell=True)
 
-    def install_node(self, version: str):
-        """
-        简单示例：根据 version 选择 nodejs 包。
-        现实中可换成 nvm/asdf 或者企业内部 node 安装脚本。
-        """
-        print(f"[build-runner] Installing Node.js version spec: {version}")
-        # 示例策略：如果 version 以 "18" 开头，就装 nodejs18，否则装默认 nodejs
-        # 实际应根据 Anolis 23 仓库中的包命名调整
-        if version.startswith("18"):
-            pkg = "nodejs"  # 假设仓库中默认就是 nodejs 18
-        else:
-            pkg = "nodejs"
-        self.install_system_packages([pkg])
-
-    def install_rust(self, version: str):
-        """
-        简单示例：使用发行版自带 rust 包，不精确到 minor 版本。
-        实际可根据 version 决定是否使用发行版包或 rustup。
-        """
-        print(f"[build-runner] Installing Rust version spec: {version}")
-        # 示例策略：无论 version 为何，先安装发行版 rust/cargo
-        # 未来你可以根据 version 调用 rustup 安装特定版本
-        self.install_system_packages(["rust", "cargo"])

@@ -31,7 +31,7 @@ def load_spec(spec_path: str) -> Dict[str, Any]:
 # OS 类型检测 & OS-specific runner 选择
 # ----------------------
 
-from os_runners import OsRunnerBase, UnsupportedOsRunner, Anolis23Runner, detect_os_runner
+from os_runners import OsRunnerBase, detect_os_runner
 
 
 # ----------------------
@@ -168,7 +168,7 @@ debug = 1"""
 def handle_environment(spec: Dict[str, Any], os_runner: OsRunnerBase) -> None:
     env_cfg = spec.get("environment", {}) or {}
     system_packages = env_cfg.get("systemPackages", []) or []
-    tools_cfg = env_cfg.get("tools", []) or []
+    tools = env_cfg.get("tools", []) or []
     variables = env_cfg.get("variables", []) or []
 
     # 1. 处理环境变量
@@ -181,35 +181,31 @@ def handle_environment(spec: Dict[str, Any], os_runner: OsRunnerBase) -> None:
 
     # 2. 安装系统包
     if system_packages:
-        # 转换为包名列表，只取 name 字段
-        package_names = []
+        # 转换为包列表，支持 name 或 {name, version} 格式
+        package_list = []
         for pkg in system_packages:
             if isinstance(pkg, dict) and 'name' in pkg:
-                package_names.append(pkg['name'])
-            elif isinstance(pkg, str):
-                # 兼容旧格式，如果直接是字符串
-                package_names.append(pkg)
-        os_runner.install_system_packages(package_names)
+                if 'version' in pkg:
+                    # 如果有版本信息，创建 name-version 格式的包名
+                    package_spec = f"{pkg['name']}-{pkg['version']}"
+                    package_list.append(package_spec)
+                else:
+                    package_list.append(pkg['name'])
+        os_runner.install_system_packages(package_list)
 
     # 3. 安装工具
-    # tools 现在也是对象列表，需要转换
-    node_version = None
-    rust_version = None
-    
-    for tool in tools_cfg:
-        if isinstance(tool, dict) and 'name' in tool and 'version' in tool:
-            if tool['name'] == 'node':
-                node_version = tool['version']
-            elif tool['name'] == 'rust':
-                rust_version = tool['version']
-    
-    if node_version:
-        os_runner.install_node(node_version)
-
-    if rust_version:
-        os_runner.install_rust(rust_version)
-
-    # 未来可以继续扩展其它工具，如 python/java 等
+    if tools:
+        # 转换为包列表，支持 name 或 {name, version} 格式
+        tool_list = []
+        for tool in tools:
+            if isinstance(tool, dict) and 'name' in tool:
+                if 'version' in tool:
+                    # 如果有版本信息，创建 name-version 格式的包名
+                    tool_spec = f"{tool['name']}-{tool['version']}"
+                    tool_list.append(tool_spec)
+                else:
+                    tool_list.append(tool['name'])
+        os_runner.install_system_packages(tool_list)
 
 
 # ----------------------

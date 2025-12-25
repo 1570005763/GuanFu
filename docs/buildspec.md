@@ -31,7 +31,7 @@ inputs:
 environment:
   variables:
     - name: SOURCE_DATE_EPOCH
-      value: 1672531200
+      value: 1717020800
     - name: LANG
       value: C.UTF-8
     - name: LC_ALL
