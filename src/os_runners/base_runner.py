@@ -25,7 +25,7 @@ class UnsupportedOsRunner(OsRunnerBase):
 def detect_os_runner(spec: Dict[str, Any]) -> OsRunnerBase:
     """
     根据 spec.container.image 或容器内 /etc/os-release 选择 OS-specific runner。
-    当前仅实现 Anolis 23，其它一律 Unsupported。
+    当前仅实现 Anolis 和 Alinux，其它一律 Unsupported。
     """
     container = spec.get("container", {})
     image = container.get("image", "")
@@ -33,7 +33,9 @@ def detect_os_runner(spec: Dict[str, Any]) -> OsRunnerBase:
     # 1) 根据 image 名字简单判断（比如包含 anolis23）
     # 2) 运行时读取 /etc/os-release
     # 这里我们做法是：优先根据 /etc/os-release 实际检测，
-    # 若是 Anolis 23 则用 Anolis23Runner，否则 Unsupported。
+    # 若是 AnolisOS 则用 AnolisOSRunner，
+    # 若是 Alinux 则用 AlinuxRunner，
+    # 否则 Unsupported。
 
     os_release = {}
     if os.path.isfile("/etc/os-release"):
@@ -55,7 +57,7 @@ def detect_os_runner(spec: Dict[str, Any]) -> OsRunnerBase:
     
     if "Anolis" in name:
         return AnolisOSRunner()
-    elif "Alibaba Cloud Linux" in name or "Alibaba" in name:
+    elif "Alibaba Cloud Linux" in name:
         return ALinuxRunner()
     else:
         return UnsupportedOsRunner(

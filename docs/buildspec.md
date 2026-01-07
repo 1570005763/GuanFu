@@ -26,7 +26,7 @@ inputs:
   rustVendor:
     url: "https://artifact.example.com/my-rust-service/releases/v1.2.3/backend-vendor.tar.gz"
     sha256: "12ab34cd..."
-    targetDir: "backend/vendor"
+    targetPath: "/workspace/backend-vendor.tar.gz"
 
 environment:
   variables:
@@ -54,15 +54,15 @@ environment:
 phases:
   prepare:
     commands:
-      - ls -R backend/vendor
+      - ls /workspace/backend-vendor.tar.gz
   build:
     commands:
-      - cargo build --release --locked --manifest-path backend/Cargo.toml
+      - cargo build ...
 
 outputs:
-  - path: "/backend/target/release/my-rust-service"
+  - path: "/workspace/target/release/my-rust-service"
     sha256: "a1b2c3d4..."           # 可选，若提供则在构建完成后计算并验证文件哈希
-  - path: "/backend/Cargo.lock"
+  - path: "/workspace/Cargo.lock"
     sha256: "e5f6g7h8..."          # 可选，若提供则在构建完成后计算并验证文件哈希
 ```
 
@@ -101,7 +101,7 @@ inputs:
   <name>:
     url: "https://artifact.example.com/my-service/releases/v1.2.3/backend-vendor.tar.gz"
     sha256: "12ab34cd..."    # 可选，若提供则做 sha256 校验
-    targetDir: "backend/vendor"
+    targetPath: "/workspace/backend-vendor.tar.gz"
 ```
 
 字段：
@@ -111,20 +111,19 @@ inputs:
   rustVendor:
     url: "https://artifact.example.com/my-rust-service/releases/v1.2.3/backend-vendor.tar.gz"
     sha256: "12ab34cd..."    # 可选，若提供则做 sha256 校验
-    targetDir: "backend/vendor"
+    targetPath: "/workspace/backend-vendor.tar.gz"
 ```
 
 - `url`：下载地址。
 - `sha256`：可选，若提供，runner 会在解压前校验文件哈希。
-- `targetDir`：解压目标目录（相对于工作目录）。
+- `targetPath`：解压目标目录（必须是绝对路径）。
 
 行为：
 
 - Runner 执行：
-  - `curl -L <url> -o /tmp/<name>.tar.gz`
-  - 如有 `sha256`，则 `echo "<sha256>  /tmp/<name>.tar.gz" | sha256sum -c -`
-  - `mkdir -p <targetDir>`
-  - `tar xf /tmp/<name>.tar.gz -C <targetDir> --strip-components=1`
+  - `mkdir -p "$(dirname <targetPath>")"`
+  - `curl -L -o <targetPath> <url>`
+  - 如有 `sha256`，则 `echo "<sha256>  <targetPath>" | sha256sum -c -`
 
 ---
 
@@ -229,9 +228,9 @@ Runner 会按顺序执行阶段：
 
 ```yaml
 outputs:
-  - path: "backend/target/release/my-rust-service"
+  - path: "/workspace/target/release/my-rust-service"
     sha256: "a1b2c3d4..."           # 可选，若提供则在构建完成后计算并验证文件哈希
-  - path: "backend/Cargo.lock"
+  - path: "/workspace/Cargo.lock"
     sha256: "e5f6g7h8..."          # 可选，若提供则在构建完成后计算并验证文件哈希
 ```
 
