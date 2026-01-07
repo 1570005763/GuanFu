@@ -49,11 +49,14 @@ def detect_os_runner(spec: Dict[str, Any]) -> OsRunnerBase:
     name = os_release.get("NAME", "")
     version_id = os_release.get("VERSION_ID", "")
 
-    # 需要延迟导入 Anolis23Runner 以避免循环导入
-    from .anolis_runner import Anolis23Runner
+    # 需要延迟导入 AnolisOSRunner 和 ALinuxRunner 以避免循环导入
+    from .anolis_runner import AnolisOSRunner
+    from .alinux_runner import ALinuxRunner
     
-    if "Anolis" in name and version_id.startswith("23"):
-        return Anolis23Runner()
+    if "Anolis" in name:
+        return AnolisOSRunner()
+    elif "Alibaba Cloud Linux" in name or "Alibaba" in name:
+        return ALinuxRunner()
     else:
         return UnsupportedOsRunner(
             reason=f"OS not supported by build-runner (NAME={name}, VERSION_ID={version_id})."
