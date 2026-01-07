@@ -7,9 +7,9 @@ from typing import List
 from .base_runner import OsRunnerBase
 
 
-class AnolisOSRunner(OsRunnerBase):
+class ALinuxRunner(OsRunnerBase):
     """
-    针对 AnolisOS 的简单实现示例。
+    针对 Alibaba Linux 的简单实现示例。
     假设容器里有 dnf/yum。
     """
 
@@ -20,8 +20,8 @@ class AnolisOSRunner(OsRunnerBase):
         version_id = os_release.get("VERSION_ID", "")
         print(f"[build-runner] Detected OS: {name} {version_id}")
 
-        if "Anolis" not in name:
-            print("[build-runner] WARNING: AnolisOSRunner used on non-AnolisOS OS", file=sys.stderr)
+        if "Alibaba Cloud Linux" not in name and "Alibaba" not in name:
+            print("[build-runner] WARNING: ALinuxRunner used on non-ALinux OS", file=sys.stderr)
 
     def _read_os_release(self) -> dict:
         result = {}
@@ -59,4 +59,3 @@ class AnolisOSRunner(OsRunnerBase):
         # -y 非交互安装，逐个安装包
         for package in packages:
             subprocess.check_call(f"{pkg_mgr} install -y {package}", shell=True)
-
