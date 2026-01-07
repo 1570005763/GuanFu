@@ -57,7 +57,7 @@ inputs:
   - name: source_code
     url: https://example.com/source.tar.gz
     sha256: abc123...
-    targetDir: ./source
+    targetPath: /workspace/source.tar.gz
 
 # 环境配置
 environment:
@@ -98,7 +98,7 @@ phases:
 - `name`: 资源名称
 - `url`: 资源下载地址
 - `sha256`: 可选，用于验证文件完整性的 SHA256 校验和
-- `targetDir`: 资源解压或放置的目标目录
+- `targetPath`: 资源解压或放置的目标目录
 
 ### 环境配置 (environment)
 

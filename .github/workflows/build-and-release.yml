@@ -1,0 +1,200 @@
+# .github/workflows/build-and-releasese.yml
+name: "Build and release workflow"
+
+on:
+  workflow_call:
+    inputs:
+      spec_path:
+        description: "Path to buildspec yaml"
+        required: false
+        type: string
+        default: "buildspec.yaml"
+      release_slsa_provenance:
+        description: "Whether to release SLSA provenance"
+        required: false
+        type: boolean
+        default: false
+      rpm_detail_provenance:
+        description: "Whether to include RPM binary hashes in provenance"
+        required: false
+        type: boolean
+        default: false
+      upload_to_release:
+        description: "Whether to upload built outputs to release"
+        required: false
+        type: boolean
+        default: false
+      upload_provenance_to_rekor:
+        description: "Whether to upload provenance to Rekor"
+        required: false
+        type: boolean
+        default: false
+      generate_rpm_binary_hashes:
+        description: "Whether to generate RPM binary hashes (used in SLSA provenance)"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  container-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. 运行Guanfu Build Action
+      # action.yml 在项目根目录，uses: ./
+      - name: Run container build
+        uses: ./
+        with:
+          spec_path: ${{ inputs.spec_path }}
+
+      # 2. 从 buildspec 解析输入输出（只在需要上传 release 或生成 provenance 时执行）
+      - name: Parse inputs and outputs from buildspec
+        if: inputs.release_slsa_provenance == true || inputs.upload_to_release == true
+        shell: bash
+        run: |
+          sudo apt-get update && sudo apt-get install -y yq
+
+          spec_abs="${{ inputs.spec_path }}"
+          if [ ! -f "$spec_abs" ]; then
+            echo "spec file not found: $spec_abs" >&2
+            exit 1
+          fi
+
+          # Parse inputs
+          inputs_files=$(yq -r '
+            .inputs // {}                                  # if no inputs, give empty object
+            | to_entries[]?                                # iterate over {key: value} entries
+            | .value                                       # take only value part
+            | select(type == "map" and has("targetPath"))   # only maps with targetPath
+            | .targetPath                                   # output targetPath
+          ' "$spec_abs")
+
+          # Add spec file path itself to inputs
+          inputs_files=$(printf '%s\n%s' "$spec_abs" "$inputs_files" | awk 'NF')
+
+          # Parse outputs
+          outputs_files=$(yq -r '
+            .outputs // []                                 # if no outputs, give empty array
+            | .[]?                                         # iterate over array elements
+            | select(type == "map" and has("path"))        # only maps with path
+            | .path                                        # output path
+          ' "$spec_abs")
+
+          printf 'INPUT_FILES<<EOF\n%s\nEOF\n' "$inputs_files" >> "$GITHUB_ENV"
+          printf 'OUTPUT_FILES<<EOF\n%s\nEOF\n' "$outputs_files" >> "$GITHUB_ENV"
+
+      # 3. 上传输出到 GitHub Release
+      - name: Upload outputs to Release
+        if: inputs.upload_to_release == true
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.OUTPUT_FILES }}
+
+      # 4. 生成输入/输出文件哈希（用于 SLSA provenance）
+      - name: Generate hashes for input and output files
+        id: generate-io-hashes
+        if: inputs.release_slsa_provenance == true
+        shell: bash
+        run: |
+          tmp_dir=$(mktemp -d)
+          hashes_txt="$tmp_dir/hashes.txt"
+          : > "$hashes_txt"
+
+          # Process combined files from INPUT_FILES and OUTPUT_FILES
+          while IFS= read -r line; do
+            file="${line#"${line%%[![:space:]]*}"}"   # remove leading whitespace
+            file="${file%"${file##*[![:space:]]}"}"   # remove trailing whitespace
+            [ -z "$file" ] && continue
+
+            if [ ! -f "$file" ]; then
+              echo "[warn] file not found: $file" >&2
+              continue
+            fi
+
+            basename=$(basename "$file")
+            # sha256sum already reads files in chunks, equivalent to chunked calculation in Python
+            sha=$(sha256sum "$file" | awk '{print $1}')
+            echo "$sha  $basename" >> "$hashes_txt"
+          done < <(printf '%s\n%s\n' "$INPUT_FILES" "$OUTPUT_FILES")
+
+          echo "Generated hashes.txt content:" >&2
+          if [ -s "$hashes_txt" ]; then
+            cat "$hashes_txt" >&2
+          else
+            echo "[warn] hashes.txt empty" >&2
+          fi
+
+          # Output base64 (single line)
+          subjects_b64=$(base64 -w0 < "$hashes_txt")
+          echo "subjects=$subjects_b64" >> "$GITHUB_OUTPUT"
+
+          rm -rf "$tmp_dir"
+
+      # 5. 生成 RPM 包的二进制哈希（可选，用于更详细的 provenance）
+      - name: Generate binary hashes for RPM packages
+        id: generate-rpm-binary-hashes
+        if: inputs.release_slsa_provenance == true && inputs.generate_rpm_binary_hashes == true
+        shell: bash
+        run: |
+          temp_dir=$(mktemp -d)
+          subjects_txt="$temp_dir/all-subjects.txt"
+          : > "$subjects_txt"
+
+          # Read from OUTPUT_FILES and filter paths ending with .rpm
+          mapfile -t rpms < <(printf '%s\n' "$OUTPUT_FILES" | awk 'NF' | grep -E '\.rpm$' || true)
+
+          if [ "${#rpms[@]}" -eq 0 ]; then
+            echo "No RPMs found in input list" >&2
+            echo "Input list (first 20 lines):" >&2
+            printf '%s\n' "$OUTPUT_FILES" | awk 'NR<=20{print}' >&2
+            rm -rf "$temp_dir"
+            exit 1
+          fi
+
+          for rpm in "${rpms[@]}"; do
+            if [ ! -f "$rpm" ]; then
+              echo "WARN: RPM not found: $rpm" >&2
+              continue
+            fi
+
+            echo "Processing RPM: $rpm" >&2
+
+            workdir="$(mktemp -d)"
+            # Extract RPM
+            if ! rpm2cpio "$rpm" | (cd "$workdir" && cpio -idmv >/dev/null 2>&1); then
+              echo "ERROR: Failed to extract RPM: $rpm" >&2
+              rm -rf "$workdir"
+              continue
+            fi
+
+            pushd "$workdir" >/dev/null
+            # Calculate sha256 for each file inside the RPM
+            while IFS= read -r -d '' f; do
+              rel="${f#./}"
+              sha="$(sha256sum "$f" | awk '{print $1}')"
+              echo "$sha  /$rel" >> "$subjects_txt"
+            done < <(find . -type f -print0 | sort -z)
+            popd >/dev/null
+
+            # Generate name index hash for the RPM package name itself
+            pkg_name="${rpm##*/}"
+            pkg_hash="$(printf "%s" "$pkg_name" | sha256sum | awk '{print $1}')"
+            echo "$pkg_hash  package-name:${pkg_name}" >> "$subjects_txt"
+
+            rm -rf "$workdir"
+          done
+
+          if [ ! -s "$subjects_txt" ]; then
+            echo "ERROR: No subjects generated" >&2
+            rm -rf "$temp_dir"
+            exit 1
+          fi
+
+          echo "Generated subjects:" >&2
+          cat "$subjects_txt" >&2
+
+          # Final output: base64(all subjects)
+          subjects_b64=$(base64 -w0 < "$subjects_txt")
+          echo "subjects=$subjects_b64" >> "$GITHUB_OUTPUT"
+
+          rm -rf "$temp_dir"

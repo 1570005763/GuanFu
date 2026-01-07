@@ -45,24 +45,19 @@ def handle_inputs(spec: Dict[str, Any]) -> None:
         print(f"[build-runner] Handling input '{name}'")
         url = cfg.get("url")
         sha256 = cfg.get("sha256")
-        target_dir = cfg.get("targetDir")
+        target_path = cfg.get("targetPath")
 
-        if not url or not target_dir:
-            print(f"[build-runner] ERROR: input '{name}' must specify url and targetDir.", file=sys.stderr)
+        if not url or not target_path:
+            print(f"[build-runner] ERROR: input '{name}' must specify url and targetPath.", file=sys.stderr)
             sys.exit(1)
         
-        print(f"[build-runner]  - url={url}, targetDir={target_dir}")
-        os.makedirs(target_dir, exist_ok=True)
-        filename = urllib.parse.unquote(os.path.basename(urllib.parse.urlparse(url).path))
-        if not filename or filename == '/':
-            print(f"[build-runner] ERROR: Could not determine filename from URL: {url}", file=sys.stderr)
-            sys.exit(1)
-        input_file = os.path.join(target_dir, filename)
-        run(f"curl -L '{url}' -o '{input_file}'")
+        print(f"[build-runner]  - url={url}, targetPath={target_path}")
+        run(f"mkdir -p \"$(dirname '{target_path}')\"")
+        run(f"curl -L -o '{target_path}' '{url}'")
 
         if sha256:
             print(f"[build-runner]  - verifying sha256")
-            run(f"echo '{sha256}  {input_file}' | sha256sum -c -")
+            run(f"echo '{sha256}  {target_path}' | sha256sum -c -")
 
 
 # ----------------------
@@ -252,3 +247,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
