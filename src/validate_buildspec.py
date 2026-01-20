@@ -11,7 +11,7 @@ from pathlib import Path
 
 def validate_buildspec(file_path):
     """
-    校验buildspec文件中outputs的path是否都是绝对路径
+    校验buildspec文件中inputs的targetPath和outputs的path是否都是绝对路径
     
     Args:
         file_path (str): buildspec文件路径
@@ -29,14 +29,27 @@ def validate_buildspec(file_path):
         print(f"错误: 解析YAML文件失败 - {e}")
         return False
     
-    # 检查是否有outputs部分
+    # 检查inputs中的targetPath是否为绝对路径
+    inputs = buildspec_data.get('inputs', [])
+    
+    all_valid = True
+    for i, input_item in enumerate(inputs):
+        if 'targetPath' in input_item:
+            target_path = input_item['targetPath']
+            # 检查路径是否为绝对路径
+            if not os.path.isabs(target_path):
+                print(f"错误: inputs[{i}].targetPath '{target_path}' 不是绝对路径")
+                all_valid = False
+        else:
+            print(f"警告: inputs[{i}] 中没有targetPath字段")
+    
+    # 检查outputs中的path是否为绝对路径
     outputs = buildspec_data.get('outputs', [])
     
     if not outputs:
         print("警告: buildspec中没有outputs部分")
-        return True
+        return all_valid
     
-    all_valid = True
     for i, output in enumerate(outputs):
         if 'path' in output:
             path = output['path']
