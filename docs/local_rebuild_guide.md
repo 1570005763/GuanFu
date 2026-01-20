@@ -9,6 +9,7 @@
 1. 已安装 Docker
 2. 已安装 Python 3.7+
 3. 已安装 Git
+4. 已安装 YAML 解析器（PyYAML 包）
 
 ## 使用方法
 
@@ -18,7 +19,7 @@ GuanFu 提供了 `build-runner.sh` 脚本，默认以容器模式运行，即启
 
 ```bash
 # 在 GuanFu 项目根目录下运行
-./scripts/build-runner.sh path/to/your/buildspec.yaml
+./src/build-runner.sh path/to/your/buildspec.yaml
 ```
 
 如果未指定 `buildspec.yaml` 文件路径，则默认使用 `buildspec.yaml`。
@@ -29,3 +30,18 @@ GuanFu 提供了 `build-runner.sh` 脚本，默认以容器模式运行，即启
 - 将 buildspec.yaml 文件和 scripts 目录挂载到容器中
 - 启动相应的容器并在其中执行构建
 - 构建完成后，输出文件会自动保存到宿主机对应目录中
+
+## 构建过程
+
+当运行 `build-runner.sh` 脚本时，将在容器内执行以下步骤：
+
+1. 确保容器内有 python3 和 pip
+2. 安装 PyYAML（如果尚未安装）
+3. 运行 `run_build.py` 脚本来执行实际的构建过程
+
+`run_build.py` 脚本会按以下顺序执行：
+
+1. 处理 inputs（下载/解压/克隆/检查）
+2. 配置默认环境参数
+3. 根据 environment 部分安装系统包和工具
+4. 执行 phases 中定义的构建阶段命令

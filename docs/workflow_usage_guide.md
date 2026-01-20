@@ -24,23 +24,35 @@ on:
 
 jobs:
   build:
-    uses: 1570005763/GuanFu/.github/workflows/build-template.yml@main
+    uses: 1570005763/GuanFu/.github/workflows/build-and-release.yml@main
     with:
-      spec_path: .buildspec.yaml
+      spec_path: buildspec.yaml
+      release_slsa_provenance: false
+      upload_to_release: false
 ```
 
 ### 2. 配置参数
 
 工作流模板支持以下参数：
 
-- `spec_path`: 指定 buildspec.yaml 文件的路径（默认为 `.buildspec.yaml`）
+- `spec_path`: 指定 buildspec.yaml 文件的路径（默认为 `buildspec.yaml`）
+- `release_slsa_provenance`: 是否发布 SLSA 证明（默认为 false）
+- `upload_to_release`: 是否将构建产物上传到发布版（默认为 false）
+- `rpm_detail_provenance`: 是否在证明中包含 RPM 二进制哈希（默认为 false）
+- `upload_provenance_to_rekor`: 是否将证明上传到 Rekor（默认为 false）
+- `generate_rpm_binary_hashes`: 是否生成 RPM 二进制哈希（用于 SLSA 证明，默认为 false）
 
 ```yaml
 jobs:
   build:
-    uses: 1570005763/GuanFu/.github/workflows/build-template.yml@main
+    uses: 1570005763/GuanFu/.github/workflows/build-and-release.yml@main
     with:
       spec_path: path/to/your/buildspec.yaml
+      release_slsa_provenance: false
+      upload_to_release: false
+      rpm_detail_provenance: false
+      upload_provenance_to_rekor: false
+      generate_rpm_binary_hashes: false
 ```
 
 ### 3. 准备 buildspec.yaml 文件
@@ -54,7 +66,7 @@ container:
 
 # 输入资源（可选）
 inputs:
-  - name: source_code
+  source_code:
     url: https://example.com/source.tar.gz
     sha256: abc123...
     targetPath: /workspace/source.tar.gz
@@ -95,7 +107,7 @@ phases:
 ### 输入资源 (inputs)
 
 定义构建过程中需要下载的外部资源，包括：
-- `name`: 资源名称
+- `<input_key>`: 输入资源的键名（如示例中的 `source_code`）
 - `url`: 资源下载地址
 - `sha256`: 可选，用于验证文件完整性的 SHA256 校验和
 - `targetPath`: 资源解压或放置的目标目录

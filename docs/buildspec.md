@@ -255,12 +255,13 @@ outputs:
 目前 `run_build.py` 中的 OS-specific runner 逻辑：
 
 - 通过 `/etc/os-release` 检测 OS 名称与版本；
-- 若检测到 `NAME` 包含 `"Anolis"` 且 `VERSION_ID` 以 `"23"` 开头，则使用 `Anolis23Runner`；
+- 若检测到 `NAME` 包含 `"Anolis"`，则使用 `AnolisOSRunner`；
+- 若检测到 `NAME` 包含 `"Alibaba Cloud Linux"` 或 `"Alibaba"`，则使用 `ALinuxRunner`；
 - 否则使用 `UnsupportedOsRunner`：
 
-  - 所有 `install_system_packages` / `install_node` / `install_rust` 调用都会报错并退出。
+  - 所有 `install_system_packages` 调用都会报错并退出。
 
 也就是说：
 
-- 当前版本 **只支持在 AnolisOS 23 容器中使用**；
-- 若需要支持其他 OS（如 Anolis 8、Alinux、Debian 等），需要扩展 `OsRunnerBase` 的实现，并在 `detect_os_runner` 中加入相应逻辑。
+- 当前版本 **支持在 AnolisOS 和 Alibaba Cloud Linux 容器中使用**；
+- 若需要支持其他 OS（如 Anolis 8、Debian 等），需要扩展 `OsRunnerBase` 的实现，并在 `detect_os_runner` 中加入相应逻辑。
