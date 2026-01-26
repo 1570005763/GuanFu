@@ -67,6 +67,43 @@ print(spec.get('container', {}).get('image', 'anolis23-build-base:latest'))
 PYEOF
 )
 
+# 提前获取 buildspec.yaml 中定义的 inputs 信息，准备挂载本地文件输入
+# 读取 inputs 部分并生成挂载参数（仅处理本地文件路径，非 HTTP(S) URL）
+INPUT_MOUNTS_INFO=$(python3 - << 'PYEOF'
+import yaml, sys, os
+spec_path = os.environ["BUILD_SPEC_FILE"]
+with open(spec_path) as f:
+    spec = yaml.safe_load(f)
+inputs = spec.get('inputs', {}) or {}
+for name, cfg in inputs.items():
+    if isinstance(cfg, dict):
+        url = cfg.get('url', '')
+        target_path = cfg.get('targetPath', '')
+        # 只处理本地文件路径（file:/// 协议）
+        if url and target_path and url.startswith('file:///'):
+            local_path = url[7:]  # 去掉 'file://' 前缀
+            print(f"{local_path}:{target_path}")
+PYEOF
+)
+
+# 为每个本地文件输入创建挂载参数
+INPUT_MOUNTS=""
+if [ -n "$INPUT_MOUNTS_INFO" ]; then
+    while IFS= read -r mount_info; do
+        if [ -n "$mount_info" ]; then
+            # mount_info 格式为 "local_path:target_path"
+            local_path=$(echo "$mount_info" | cut -d':' -f1)
+            target_path=$(echo "$mount_info" | cut -d':' -f2-)
+            if [ -e "$local_path" ]; then
+                # 添加挂载参数：将宿主机文件挂载到容器的 targetPath
+                INPUT_MOUNTS="$INPUT_MOUNTS -v $local_path:$target_path"
+            else
+                echo "Warning: Local input file not found: $local_path"
+            fi
+        fi
+    done <<< "$INPUT_MOUNTS_INFO"
+fi
+
 # 提前获取 buildspec.yaml 中定义的 outputs 信息，准备挂载输出文件
 # 读取 outputs 部分并生成挂载参数
 OUTPUT_PATHS=$(python3 - << 'PYEOF'
@@ -104,12 +141,13 @@ echo "==========================================="
 echo "Container Build Configuration:"
 echo "  Running build in container: $CONTAINER_IMAGE"
 echo "  Build spec file: $BUILD_SPEC_FILE"
+echo "  Input mounts: $INPUT_MOUNTS"
 echo "  Output mounts: $OUTPUT_MOUNTS"
 echo "==========================================="
 
 # docker run --rm $OUTPUT_MOUNTS -v "$BUILD_SPEC_FILE:/opt/build-system/buildspec.yaml" -v "$SCRIPT_DIR:/opt/build-system/scripts" "$CONTAINER_IMAGE" \
 #     /bin/bash -c "cd /opt/build-system && python3 scripts/run_build.py buildspec.yaml"
-docker run --rm $OUTPUT_MOUNTS \
+docker run --rm $INPUT_MOUNTS $OUTPUT_MOUNTS \
   -v "$BUILD_SPEC_FILE:/opt/build-system/buildspec.yaml" \
   -v "$SCRIPT_DIR:/opt/build-system/scripts" \
   "$CONTAINER_IMAGE" \

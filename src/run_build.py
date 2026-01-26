@@ -52,8 +52,21 @@ def handle_inputs(spec: Dict[str, Any]) -> None:
             sys.exit(1)
         
         print(f"[build-runner]  - url={url}, targetPath={target_path}")
-        run(f"mkdir -p \"$(dirname '{target_path}')\"")
-        run(f"curl -L -o '{target_path}' '{url}'")
+        
+        if url.startswith("file:///"):
+            # 本地文件已由 build-runner.sh 挂载到 targetPath，无需下载
+            print(f"[build-runner]  - local file (mounted by build-runner.sh)")
+            if not os.path.exists(target_path):
+                print(f"[build-runner] ERROR: local file not mounted at '{target_path}'", file=sys.stderr)
+                sys.exit(1)
+        elif url.startswith("http://") or url.startswith("https://"):
+            # 远程 URL，需要下载
+            print(f"[build-runner]  - downloading from remote URL")
+            run(f"mkdir -p \"$(dirname '{target_path}')\"")
+            run(f"curl -L -o '{target_path}' '{url}'")
+        else:
+            print(f"[build-runner] ERROR: unsupported URL scheme in '{url}'. Use http://, https://, or file:///", file=sys.stderr)
+            sys.exit(1)
 
         if sha256:
             print(f"[build-runner]  - verifying sha256")
