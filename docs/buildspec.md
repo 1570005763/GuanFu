@@ -92,7 +92,7 @@ container:
 
 ## `inputs`：构建输入
 
-`inputs` 用于声明构建所需的外部输入，例如从制品库下载的 vendor 包等。
+`inputs` 用于声明构建所需的外部输入，例如从制品库下载的 vendor 包、本地文件等。
 
 结构：
 
@@ -112,18 +112,29 @@ inputs:
     url: "https://artifact.example.com/my-rust-service/releases/v1.2.3/backend-vendor.tar.gz"
     sha256: "12ab34cd..."    # 可选，若提供则做 sha256 校验
     targetPath: "/workspace/backend-vendor.tar.gz"
+  
+  localFile:
+    url: "file:///path/to/local/file.tar.gz"    # 本地文件路径
+    sha256: "12ab34cd..."    # 可选，若提供则做 sha256 校验
+    targetPath: "/workspace/local-file.tar.gz"
 ```
 
-- `url`：下载地址。
-- `sha256`：可选，若提供，runner 会在解压前校验文件哈希。
-- `targetPath`：解压目标目录（必须是绝对路径）。
+- `url`：文件来源地址，支持两种格式：
+  - **http(s) URL**：远程文件下载地址（如 `https://...`）
+  - **file:// URL**：宿主机上的本地文件（如 `file:///path/to/file`），将被映射到容器中
+- `sha256`：可选，若提供，runner 会在处理前校验文件哈希。
+- `targetPath`：目标路径（必须是绝对路径）。
 
 行为：
 
-- Runner 执行：
+- **远程 URL**：Runner 执行下载操作：
   - `mkdir -p "$(dirname <targetPath>")"`
   - `curl -L -o <targetPath> <url>`
   - 如有 `sha256`，则 `echo "<sha256>  <targetPath>" | sha256sum -c -`
+
+- **file:// URI**：Runner 将宿主机文件映射到容器：
+  - 宿主机上的 `url` 路径（去除 `file://` 前缀后）会被挂载到容器中的 `targetPath` 位置
+  - 适用于本地开发或 CI 环境中已存在的文件
 
 ---
 
