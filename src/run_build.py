@@ -13,7 +13,14 @@ from typing import Dict, Any, Optional
 
 def run(cmd: str, env: Optional[Dict[str, str]] = None) -> None:
     print(f"+ {cmd}")
-    subprocess.check_call(cmd, shell=True, env=env)
+    
+    bashrc = os.path.expanduser("~/.bashrc")
+    if os.path.isfile(bashrc):
+        bash_cmd = f'source {bashrc} >/dev/null 2>&1; {cmd}'
+    else:
+        bash_cmd = cmd
+    
+    subprocess.check_call(["bash", "-c", bash_cmd], env=env)
 
 
 def ensure_file(path: str) -> None:

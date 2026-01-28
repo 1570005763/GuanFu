@@ -117,7 +117,7 @@ class AnolisOSRunner(OsRunnerBase):
         if self._run_cmd(default_cmd):
             return
 
-        # 2) 从 23.0 起递增 releasever
+        # 2) 从 23.0 或 8 起递增 releasever
         for rv in self._iter_releasevers():
             # 先判断这个 releasever 是否可用
             if not self._releasever_is_valid(rv):
@@ -138,7 +138,7 @@ class AnolisOSRunner(OsRunnerBase):
         # 全都失败
         raise RuntimeError(
             f"[build-runner] Failed to install package '{package}' "
-            f"using default repos and auto-incremented 23.x releasevers."
+            f"using default repos and auto-incremented releasevers."
         )
         
     def install_system_packages(self, packages: List[str]):

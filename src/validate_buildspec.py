@@ -30,18 +30,17 @@ def validate_buildspec(file_path):
         return False
     
     # 检查inputs中的targetPath是否为绝对路径
-    inputs = buildspec_data.get('inputs', [])
-    
+    inputs = buildspec_data.get('inputs', {})  # 改成默认 {}
+
     all_valid = True
-    for i, input_item in enumerate(inputs):
-        if 'targetPath' in input_item:
+    for name, input_item in inputs.items():
+        if isinstance(input_item, dict) and 'targetPath' in input_item:
             target_path = input_item['targetPath']
-            # 检查路径是否为绝对路径
             if not os.path.isabs(target_path):
-                print(f"错误: inputs[{i}].targetPath '{target_path}' 不是绝对路径")
+                print(f"错误: inputs['{name}'].targetPath '{target_path}' 不是绝对路径")
                 all_valid = False
         else:
-            print(f"警告: inputs[{i}] 中没有targetPath字段")
+            print(f"警告: inputs['{name}'] 中没有targetPath字段")
     
     # 检查outputs中的path是否为绝对路径
     outputs = buildspec_data.get('outputs', [])

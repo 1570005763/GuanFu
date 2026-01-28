@@ -98,7 +98,8 @@ if [ -n "$INPUT_MOUNTS_INFO" ]; then
                 # 添加挂载参数：将宿主机文件挂载到容器的 targetPath
                 INPUT_MOUNTS="$INPUT_MOUNTS -v $local_path:$target_path"
             else
-                echo "Warning: Local input file not found: $local_path"
+                echo "Error: Local input file not found: $local_path"
+                exit 1
             fi
         fi
     done <<< "$INPUT_MOUNTS_INFO"

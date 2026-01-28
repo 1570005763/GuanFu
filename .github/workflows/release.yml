@@ -1,0 +1,310 @@
+# .github/workflows/release.yml
+name: "GuanFu Release workflow"
+
+on:
+  workflow_call:
+    inputs:
+      input_artifact:
+        description: "Artifact name for build inputs"
+        required: false
+        type: string
+        default: ""
+      output_artifact:
+        description: "Artifact name for build outputs"
+        required: false
+        type: string
+        default: ""
+      release_slsa_provenance:
+        description: "Whether to release SLSA provenance"
+        required: false
+        type: boolean
+        default: false
+      rpm_detail_provenance:
+        description: "Whether to include RPM binary hashes in provenance"
+        required: false
+        type: boolean
+        default: false
+      upload_provenance_to_rekor:
+        description: "Whether to upload provenance to Rekor"
+        required: false
+        type: boolean
+        default: false
+      provenance_name:
+        description: "Name of the provenance file"
+        required: false
+        type: string
+        default: "slsa-provenance.intoto.jsonl"
+      release_tag_name:
+        description: "Release tag name"
+        required: true
+        type: string
+
+jobs:
+  # Job 1: 发布
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Prepare directories
+        run: mkdir -p /tmp/input /tmp/output
+
+      # 1. 下载构建输入 artifact
+      - name: Download input artifact
+        if: inputs.input_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.input_artifact }}
+          path: /tmp/input
+
+      # 2. 下载构建输出 artifact
+      - name: Download output artifact
+        if: inputs.output_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.output_artifact }}
+          path: /tmp/output
+
+      # 3. 上传所有文件到 Release
+      - name: Upload artifacts to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            /tmp/input/**
+            /tmp/output/**
+
+  # Job 2: 材料准备
+  prepare:
+    runs-on: ubuntu-latest
+    if: inputs.release_slsa_provenance == true
+    outputs:
+      combined_subjects: ${{ steps.combine.outputs.subjects }}
+
+    steps:
+      # 1. 下载构建输入 artifact
+      - name: Download input artifact
+        if: inputs.input_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.input_artifact }}
+          path: inputs/
+
+      # 2. 下载构建输出 artifact
+      - name: Download output artifact
+        if: inputs.output_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.output_artifact }}
+          path: outputs/
+
+      # 3. 生成输入/输出文件哈希（用于 SLSA provenance）
+      # This step generates SHA256 hashes for all input/output files and exports:
+      # - IO_SUBJECTS_B64: base64-encoded hash list for SLSA provenance (via GITHUB_ENV)
+      - name: Generate hashes for input and output files
+        id: generate-io-hashes
+        if: inputs.release_slsa_provenance == true
+        run: |
+          set -euo pipefail
+          hashes=""
+          for dir in inputs outputs; do
+            if [ -d "$dir" ]; then
+              while IFS= read -r -d '' file; do
+                hash=$(sha256sum "$file" | awk '{print $1}')
+                name=$(basename "$file")
+                hashes="$hashes$hash  $name\n"
+              done < <(find "$dir" -type f -print0)
+            fi
+          done
+
+          echo "Generated subjects:" >&2
+          echo "$hashes" >&2
+
+          echo "IO_SUBJECTS_B64=$(echo -e "$hashes" | base64 -w0)" >> "$GITHUB_ENV"
+
+      # 4. 生成 RPM 包的二进制哈希（可选，用于更详细的 provenance）
+      # This step extracts RPM packages from outputs/ and generates SHA256 hashes for all binaries inside, exports:
+      # - subjects: base64-encoded hash list including internal file hashes and package name hashes
+      - name: Generate binary hashes for RPM packages
+        id: generate-rpm-binary-hashes
+        if: inputs.release_slsa_provenance == true && inputs.rpm_detail_provenance == true
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y rpm2cpio cpio
+
+          temp_dir=$(mktemp -d)
+          trap 'rm -rf "$temp_dir"' EXIT
+          subjects_txt="$temp_dir/all-subjects.txt"
+          : > "$subjects_txt"
+
+          # Find all RPM files in outputs/
+          mapfile -t rpms < <(find outputs/ -type f -name '*.rpm' 2>/dev/null || true)
+
+          for rpm in "${rpms[@]}"; do
+            if [ ! -f "$rpm" ]; then
+              echo "WARN: RPM not found: $rpm" >&2
+              continue
+            fi
+
+            echo "Processing RPM: $rpm" >&2
+
+            workdir="$(mktemp -d)"
+            # Extract RPM
+            if ! rpm2cpio "$rpm" | (cd "$workdir" && cpio -idmv >/dev/null 2>&1); then
+              echo "ERROR: Failed to extract RPM: $rpm" >&2
+              rm -rf "$workdir"
+              continue
+            fi
+
+            pushd "$workdir" >/dev/null
+            # Calculate sha256 for each file inside the RPM (sorted)
+            while IFS= read -r -d '' f; do
+              rel="${f#./}"
+              sha="$(sha256sum "$f" | awk '{print $1}')"
+              echo "$sha  /$rel" >> "$subjects_txt"
+            done < <(find . -type f -print0 | sort -z)
+            popd >/dev/null
+
+            # Generate name index hash for the RPM package name itself
+            pkg_name="${rpm##*/}"
+            pkg_hash="$(printf "%s" "$pkg_name" | sha256sum | awk '{print $1}')"
+            echo "$pkg_hash  package-name:${pkg_name}" >> "$subjects_txt"
+
+            rm -rf "$workdir"
+          done
+
+          echo "Generated subjects:" >&2
+          cat "$subjects_txt" >&2
+
+          # Final output: base64(all subjects)
+          subjects_b64=$(base64 -w0 < "$subjects_txt")
+          echo "RPM_SUBJECTS_B64=$subjects_b64" >> "$GITHUB_ENV"
+
+      # 5. 合并所有 subjects
+      # This step combines io_subjects and rpm_subjects (if available) into a single base64-encoded output:
+      # - subjects: base64-encoded combined hash list for SLSA provenance
+      - name: Combine subjects
+        id: combine
+        run: |
+          set -euo pipefail
+
+          io_subjects_b64="$IO_SUBJECTS_B64"
+          rpm_subjects_b64="$RPM_SUBJECTS_B64"
+
+          if [ -z "$io_subjects_b64" ]; then
+            echo "ERROR: io_subjects is empty" >&2
+            exit 1
+          fi
+
+          io_subjects=$(echo "$io_subjects_b64" | base64 -d)
+
+          if [ -n "$rpm_subjects_b64" ]; then
+            rpm_subjects=$(echo "$rpm_subjects_b64" | base64 -d)
+            all_subjects=$(printf '%s\n%s\n' "$io_subjects" "$rpm_subjects" | sed '/^$/d')
+          else
+            all_subjects="$io_subjects"
+          fi
+
+          if [ -z "$all_subjects" ]; then
+            echo "ERROR: No subjects found to combine" >&2
+            exit 1
+          fi
+
+          echo "Combined subjects:" >&2
+          echo "$all_subjects" >&2
+
+          combined_b64=$(printf '%s' "$all_subjects" | base64 -w0)
+          echo "subjects=$combined_b64" >> "$GITHUB_OUTPUT"
+
+  # Job 3: 生成 SLSA Provenance
+  provenance:
+    name: Generate SLSA Provenance
+    needs: [prepare]
+    if: inputs.release_slsa_provenance == true
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      compile-generator: false
+      provenance-name: ${{ inputs.provenance_name }}
+      base64-subjects: ${{ needs.prepare.outputs.combined_subjects }}
+      upload-assets: true
+
+  # Job 4: 上传 Provenance 到 Rekor
+  upload-rekor-provenance:
+    name: Upload Provenance to Rekor
+    runs-on: ubuntu-22.04
+    needs: [provenance]
+    if: inputs.upload_provenance_to_rekor == true
+    steps:
+      - name: Download provenance files from release
+        run: |
+          set -euo pipefail
+          
+          # Create directory for provenance files
+          mkdir -p provenance-files
+          cd provenance-files
+          
+          # Get release assets using GitHub API
+          assets_url=$(curl -s \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ inputs.release_tag_name }}" \
+            | jq -r '.assets[] | select(.name | endswith(".intoto.jsonl")) | .browser_download_url')
+          
+          # Download each .intoto.jsonl file
+          echo "Downloading provenance files..."
+          while IFS= read -r url; do
+            if [ -n "$url" ]; then
+              filename=$(basename "$url")
+              echo "Downloading $filename"
+              curl -L "$url" -o "$filename"
+            fi
+          done <<< "$assets_url"
+          
+          # List downloaded files
+          echo "Downloaded files:"
+          ls -la
+
+      - name: Install rekor-cli for intoto uploads
+        run: |
+          set -euo pipefail
+          REKOR_VERSION="v1.3.6"
+          curl -L "https://github.com/sigstore/rekor/releases/download/${REKOR_VERSION}/rekor-cli-linux-amd64" -o rekor-cli
+          chmod +x rekor-cli
+          sudo mv rekor-cli /usr/local/bin/rekor-cli
+
+      - name: Upload provenance to Rekor using intoto entries
+        env:
+          REKOR_URL: ${{ vars.REKOR_URL || 'https://rekor.sigstore.dev' }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          cd provenance-files
+
+          for bundle in *.intoto.jsonl; do
+            echo "Processing provenance bundle: ${bundle}"
+            
+            # Skip if no files match the pattern
+            if [ ! -f "$bundle" ]; then
+              echo "No .intoto.jsonl files found"
+              break
+            fi
+
+            # Extract DSSE envelope from the Sigstore bundle (support both v0.3+ layouts)
+            jq '.dsseEnvelope // .content.dsseEnvelope' "${bundle}" > dsse-envelope.json
+
+            # Extract signing certificate (leaf cert) and convert to PEM.
+            # Prefer top-level certificate.rawBytes; fall back to x509CertificateChain[0].rawBytes if present.
+            jq -r '.verificationMaterial.certificate.rawBytes // .verificationMaterial.x509CertificateChain.certificates[0].rawBytes' "${bundle}" | base64 -d > cert.der
+            openssl x509 -inform DER -in cert.der -out cert.pem
+
+            # Upload an intoto entry which, when attestation storage is enabled on Rekor,
+            # stores the decoded DSSE payload bytes.
+            rekor-cli upload \
+              --rekor_server "${REKOR_URL}" \
+              --type intoto \
+              --public-key cert.pem \
+              --artifact dsse-envelope.json
+
+            rm -f dsse-envelope.json cert.der cert.pem
+          done
