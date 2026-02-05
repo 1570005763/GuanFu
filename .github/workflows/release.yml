@@ -38,6 +38,11 @@ on:
         description: "Release tag name"
         required: true
         type: string
+      prerelease:
+        description: "Whether this is a prerelease"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   # Job 1: 发布
@@ -68,6 +73,8 @@ jobs:
       - name: Upload artifacts to Release
         uses: softprops/action-gh-release@v2
         with:
+          fail_on_unmatched_files: true
+          prerelease: ${{ inputs.prerelease }}
           files: |
             /tmp/input/**
             /tmp/output/**
