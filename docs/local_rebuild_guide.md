@@ -77,7 +77,10 @@ guanfu rebuild koji-rpm \
 - RPM header 字段差异，例如 `BUILDTIME`、`BUILDHOST`、`PAYLOADDIGEST`、`RSAHEADER`
 - 文件清单差异，例如只存在于发布 RPM 或 rebuild RPM 的文件
 - 文件属性差异，例如 `mtime`、`digest`、`size`、`mode`、owner/group
-- 汇总判断，例如是否仅有 mtime 差异、是否存在内容相关差异
+- 差异分类，例如 `RPM_SIGNATURE`、`RPM_METADATA`、`FILE_TIMESTAMP`、`FILE_PERMISSION`、`FILE_ADDED`、`FILE_REMOVED`、`SYMLINK_TARGET`、`DOC_CONTENT`、`CONFIG_CONTENT`、`SCRIPT_CONTENT`、`COMPRESSION`、`DEBUG_INFO`、`OTHER`
+- 汇总判断，例如 `risk_level`、`trust_level`、`reproducible`、`diff_by_risk_level`
+
+当前默认使用 `light` 分析模式。该模式只依赖 RPM header、RPM 文件清单、scriptlet 和路径规则，不会解包并解析 ELF section 或 BuildID。因此，当可执行文件或动态库内容发生变化时，报告会保守输出 `OTHER`，并通过 `possible_diff_types` 标记可能属于 `BINARY_CODE`、`BINARY_BUILDID` 或 `DEBUG_INFO`，同时将 `analysis_status` 标记为 `needs_deep_analysis`。
 
 默认 Koji 配置：
 

@@ -1,6 +1,8 @@
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
+from guanfu.koji_rebuild.assessment import ASSESSMENT_VERSION, build_light_assessment
 from guanfu.koji_rebuild.downloader import sha256_file
 
 
@@ -12,6 +14,10 @@ def _run_text(cmd):
     if proc.returncode != 0:
         return None, proc.stderr.strip()
     return proc.stdout, None
+
+
+def _analysis_time():
+    return datetime.now().astimezone().isoformat()
 
 
 def _rpm_query(path):
@@ -121,6 +127,9 @@ def _file_brief(item):
         "mode": item.get("mode"),
         "owner": item.get("owner"),
         "group": item.get("group"),
+        "isconfig": item.get("isconfig"),
+        "isdoc": item.get("isdoc"),
+        "rdev": item.get("rdev"),
         "linkto": item.get("linkto"),
     }
 
@@ -169,7 +178,7 @@ def _diff_files(published_rpm, rebuilt_rpm):
             "status": "error",
             "published_error": published_err,
             "rebuilt_error": rebuilt_err,
-        }
+        }, None
 
     published_files = published_dump["files"]
     rebuilt_files = rebuilt_dump["files"]
@@ -201,7 +210,7 @@ def _diff_files(published_rpm, rebuilt_rpm):
         if set(item["changed_fields"]) & {"digest", "size", "linkto"}
     ]
 
-    return {
+    public_diff = {
         "status": "compared",
         "published_file_count": len(published_files),
         "rebuilt_file_count": len(rebuilt_files),
@@ -221,9 +230,15 @@ def _diff_files(published_rpm, rebuilt_rpm):
             "rebuilt_count": len(rebuilt_dump["unparsed"]),
         },
     }
+    analysis_input = {
+        "only_in_published": only_in_published,
+        "only_in_rebuilt": only_in_rebuilt,
+        "changed": changed,
+    }
+    return public_diff, analysis_input
 
 
-def compare_published_and_rebuilt(published_rpm, result_rpms, target_filename):
+def compare_published_and_rebuilt(published_rpm, result_rpms, target_filename, reference_url=None):
     published = Path(published_rpm)
     rebuilt = _find_rebuilt_rpm(result_rpms, target_filename)
     if not rebuilt:
@@ -243,30 +258,58 @@ def compare_published_and_rebuilt(published_rpm, result_rpms, target_filename):
 
     published_headers = _rpm_query(published)
     rebuilt_headers = _rpm_query(rebuilt)
+    header_diff = _diff_headers(published_headers, rebuilt_headers)
+    files_diff, file_analysis = _diff_files(published, rebuilt)
+    published_sha256 = sha256_file(published)
+    rebuilt_sha256 = sha256_file(rebuilt)
+    rpm_file_sha256_equal = published_sha256 == rebuilt_sha256
+    requires_equal = published_requires == rebuilt_requires
+    provides_equal = published_provides == rebuilt_provides
+    scripts_equal = published_scripts == rebuilt_scripts
+    dump_equal = published_dump == rebuilt_dump
+    assessment = build_light_assessment(
+        rpm_file_sha256_equal,
+        header_diff,
+        files_diff,
+        file_analysis,
+        requires_equal,
+        provides_equal,
+        scripts_equal,
+    )
 
-    return {
+    result = {
+        "version": ASSESSMENT_VERSION,
         "status": "compared",
         "target_filename": target_filename,
+        "metadata": {
+            "package_name": target_filename,
+            "reference_url": reference_url,
+            "reference_sha256": published_sha256,
+            "rebuild_sha256": rebuilt_sha256,
+            "analysis_time": _analysis_time(),
+        },
         "published": {
             "file": str(published),
-            "sha256": sha256_file(published),
+            "sha256": published_sha256,
             "headers": published_headers,
         },
         "rebuilt": {
             "file": str(rebuilt),
-            "sha256": sha256_file(rebuilt),
+            "sha256": rebuilt_sha256,
             "headers": rebuilt_headers,
         },
-        "rpm_file_sha256_equal": sha256_file(published) == sha256_file(rebuilt),
-        "requires_equal": published_requires == rebuilt_requires,
-        "provides_equal": published_provides == rebuilt_provides,
-        "scripts_equal": published_scripts == rebuilt_scripts,
-        "dump_equal": published_dump == rebuilt_dump,
+        "rpm_file_sha256_equal": rpm_file_sha256_equal,
+        "requires_equal": requires_equal,
+        "provides_equal": provides_equal,
+        "scripts_equal": scripts_equal,
+        "dump_equal": dump_equal,
         "differences": {
-            "headers": _diff_headers(published_headers, rebuilt_headers),
-            "files": _diff_files(published, rebuilt),
+            "headers": header_diff,
+            "files": files_diff,
         },
     }
+    result.update(assessment)
+    return result
 
 
 def compare_srpms(published_srpm, task_srpm):
