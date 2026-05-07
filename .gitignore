@@ -64,6 +64,9 @@ htmlcov/
 # Documentation builds
 docs/_build/
 
+# Local rebuild output
+guanfu-koji-rebuild/
+
 # IPython
 .ipynb_checkpoints
 
