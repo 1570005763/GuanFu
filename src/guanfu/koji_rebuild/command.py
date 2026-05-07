@@ -1,8 +1,10 @@
 import re
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
+from guanfu.koji_rebuild.assessment import ASSESSMENT_VERSION
 from guanfu.koji_rebuild.client import KojiClient
 from guanfu.koji_rebuild.compare import compare_published_and_rebuilt, compare_srpms
 from guanfu.koji_rebuild.downloader import (
@@ -20,6 +22,10 @@ from guanfu.koji_rebuild.rpm_name import parse_rpm_filename, rpm_filename
 
 def _safe_name(name):
     return re.sub(r"[^A-Za-z0-9_.+-]+", "_", name)
+
+
+def _analysis_time():
+    return datetime.now().astimezone().isoformat()
 
 
 def _run_dir(workdir, rpm_name):
@@ -54,6 +60,163 @@ def _download_published(url, dest, label):
     return path, summarize_file(path, label=label, url=url)
 
 
+def _without_none(data):
+    return dict((key, value) for key, value in data.items() if value is not None)
+
+
+def _public_artifact(summary, source_type=None, url=None, task_id=None):
+    if not summary:
+        return None
+    artifact = {}
+    for key in ("file", "url", "size", "sha256", "error"):
+        if key in summary:
+            artifact[key] = summary[key]
+    if url:
+        artifact["url"] = url
+    if source_type:
+        artifact["source_type"] = source_type
+    if task_id:
+        artifact["task_id"] = task_id
+    return _without_none(artifact)
+
+
+def _srpm_cross_check_summary(cross_check):
+    if not cross_check or cross_check.get("status") == "skipped":
+        return {"status": "skipped"}
+    return {
+        "status": cross_check.get("status"),
+        "file_sha256_equal": cross_check.get("file_sha256_equal"),
+        "published_srpm_sha256": cross_check.get("published_srpm_sha256"),
+        "koji_task_srpm_sha256": cross_check.get("koji_task_srpm_sha256"),
+    }
+
+
+def _build_environment_summary(args, resolution=None, repo_probe=None, mock_cfg=None):
+    buildroot = resolution.buildroot if resolution else {}
+    environment = {
+        "koji_server": args.koji_server,
+        "koji_topurl": args.koji_topurl,
+        "buildroot_id": buildroot.get("id"),
+        "buildroot_tag": buildroot.get("tag_name"),
+        "buildroot_arch": buildroot.get("arch"),
+        "buildroot_repo_id": buildroot.get("repo_id"),
+        "historical_repo_url": repo_probe.get("url") if repo_probe else None,
+        "historical_repo_available": repo_probe.get("status") == 200 if repo_probe else None,
+    }
+    if mock_cfg:
+        environment["mock_config"] = _public_artifact(summarize_file(mock_cfg))
+    return _without_none(environment)
+
+
+def _rebuild_summary(args, status, rebuilds=None, repeatable=None, reason=None, error=None):
+    summary = {
+        "tool": "mock",
+        "status": status,
+        "runs": args.runs,
+        "isolation": args.isolation,
+    }
+    if reason:
+        summary["reason"] = reason
+    if error:
+        summary["error"] = error
+    if repeatable is not None:
+        summary["repeatable_by_rpm_sha256"] = repeatable
+    if rebuilds:
+        summary["runs_detail"] = [
+            {
+                "run": item.get("run"),
+                "exit_code": item.get("exit_code"),
+                "elapsed_seconds": item.get("elapsed_seconds"),
+                "rpms": [_public_artifact(rpm) for rpm in item.get("rpms", [])],
+            }
+            for item in rebuilds
+        ]
+    return summary
+
+
+def _unavailable_assessment(field, confidence=0.9):
+    return {
+        "overall_assessment": {
+            "risk_level": "critical",
+            "action": "reject",
+            "reproducible": False,
+            "confidence": confidence,
+            "trust_level": "L0",
+        },
+        "diff_items": [
+            {
+                "diff_type": "OTHER",
+                "risk_level": "critical",
+                "fields": [field],
+            }
+        ],
+        "summary_stats": {
+            "total_diff_types": 1,
+            "total_diff_items": 1,
+            "diff_by_risk_level": {
+                "none": 0,
+                "low": 0,
+                "medium": 0,
+                "high": 0,
+                "critical": 1,
+            },
+            "diff_by_type": {"OTHER": 1},
+            "needs_deep_analysis_count": 0,
+        },
+    }
+
+
+def _analysis_summary():
+    return {
+        "mode": "light",
+        "capabilities": {
+            "rpm_header": True,
+            "rpm_file_manifest": True,
+            "rpm_scriptlet": True,
+            "path_based_classification": True,
+            "elf_section_compare": False,
+            "elf_buildid_compare": False,
+            "payload_decompression_compare": False,
+        },
+        "unsupported_precise_types": ["BINARY_CODE", "BINARY_BUILDID"],
+    }
+
+
+def _input_artifacts_summary(
+    published_rpm_summary=None,
+    task_srpm_summary=None,
+    log_summaries=None,
+    source_rpm_summary=None,
+    source_rpm_type=None,
+    source_rpm_url=None,
+    task_id=None,
+    srpm_cross_check=None,
+):
+    artifacts = {
+        "reference_rpm": _public_artifact(
+            published_rpm_summary,
+            source_type="published_binary_repo",
+        ),
+        "source_rpm": _public_artifact(
+            source_rpm_summary,
+            source_type=source_rpm_type,
+            url=source_rpm_url,
+            task_id=task_id if source_rpm_type == "koji_task_output" else None,
+        ),
+        "koji_task_srpm": _public_artifact(
+            task_srpm_summary,
+            source_type="koji_task_output",
+            task_id=task_id,
+        ),
+        "koji_logs": [
+            _public_artifact(item, source_type="koji_task_output", task_id=task_id)
+            for item in (log_summaries or [])
+        ],
+        "source_rpm_cross_check": _srpm_cross_check_summary(srpm_cross_check),
+    }
+    return _without_none(artifacts)
+
+
 def run_koji_rpm_rebuild(args):
     if args.slsa_provenance:
         print(
@@ -76,16 +239,15 @@ def run_koji_rpm_rebuild(args):
     metadata_dir.mkdir(parents=True, exist_ok=True)
 
     report = {
-        "input": {
-            "rpm_name": args.rpm_name,
-            "koji_server": args.koji_server,
-            "koji_topurl": args.koji_topurl,
-            "binary_rpm_base_url": args.binary_rpm_base_url,
-            "source_rpm_base_url": args.source_rpm_base_url,
-            "runs": args.runs,
-            "isolation": args.isolation,
+        "version": ASSESSMENT_VERSION,
+        "metadata": {
+            "package_name": args.rpm_name,
+            "analysis_time": _analysis_time(),
         },
-        "workdir": str(run_dir),
+        "input_artifacts": {},
+        "build_environment": _build_environment_summary(args),
+        "rebuild": _rebuild_summary(args, "started"),
+        "analysis": _analysis_summary(),
     }
 
     try:
@@ -101,11 +263,21 @@ def run_koji_rpm_rebuild(args):
         write_json(metadata_dir / "task-result.json", resolution.task_result)
 
         repo_probe = probe_repodata(args.koji_topurl, resolution.buildroot)
-        report["repo_probe"] = repo_probe
         write_json(metadata_dir / "repo-probe.json", repo_probe)
         if repo_probe.get("status") != 200:
-            report["status"] = "skipped"
-            report["reason"] = "original buildroot repo repomd.xml is not available"
+            report["metadata"]["package_name"] = target_rpm_name
+            report["metadata"]["analysis_time"] = _analysis_time()
+            report["build_environment"] = _build_environment_summary(
+                args,
+                resolution=resolution,
+                repo_probe=repo_probe,
+            )
+            report["rebuild"] = _rebuild_summary(
+                args,
+                "skipped",
+                reason="original buildroot repo repomd.xml is not available",
+            )
+            report.update(_unavailable_assessment("historical_repo"))
             write_json(run_dir / "report.json", report)
             print(f"[guanfu] Historical repo is not available: {repo_probe.get('url')}", file=sys.stderr)
             return 3
@@ -139,20 +311,17 @@ def run_koji_rpm_rebuild(args):
             inputs_dir,
         )
 
-        downloads = [published_rpm_summary, task_srpm_summary] + log_summaries
-        if published_srpm_summary:
-            downloads.insert(1, published_srpm_summary)
-        report["downloads"] = downloads
-
         srpm_for_rebuild = published_srpm
-        report["srpm_source"] = "openanolis_source_mirror"
-        report["srpm_is_published_artifact"] = True
+        source_rpm_summary = published_srpm_summary
+        source_rpm_type = "published_source_repo"
+        source_rpm_url = published_srpm_url
         if not srpm_for_rebuild:
             srpm_for_rebuild = task_srpm
-            report["srpm_source"] = "koji_task_fallback"
-            report["srpm_is_published_artifact"] = False
+            source_rpm_summary = task_srpm_summary
+            source_rpm_type = "koji_task_output"
+            source_rpm_url = None
 
-        report["srpm_cross_check"] = compare_srpms(published_srpm, task_srpm)
+        srpm_cross_check = compare_srpms(published_srpm, task_srpm)
 
         mock_cfg = inputs_dir / "mock.cfg"
         generate_mock_config(
@@ -161,10 +330,6 @@ def run_koji_rpm_rebuild(args):
             resolution.buildroot["id"],
             mock_cfg,
         )
-        report["mock_config"] = {
-            "file": str(mock_cfg),
-            "buildroot_id": resolution.buildroot["id"],
-        }
 
         rebuilds = []
         for run_index in range(1, args.runs + 1):
@@ -174,13 +339,12 @@ def run_koji_rpm_rebuild(args):
             rebuilds.append(result)
             if result["exit_code"] != 0:
                 break
-        report["rebuilds"] = rebuilds
 
         successful = rebuilds and all(item["exit_code"] == 0 for item in rebuilds)
-        report["status"] = "rebuilt" if successful else "failed"
+        repeatable = None
         if successful:
             first_run_rpms = [Path(item.get("path", item["file"])) for item in rebuilds[0]["rpms"]]
-            report["comparison"] = compare_published_and_rebuilt(
+            comparison = compare_published_and_rebuilt(
                 published_rpm,
                 first_run_rpms,
                 target_rpm_name,
@@ -188,17 +352,78 @@ def run_koji_rpm_rebuild(args):
             )
             if len(rebuilds) > 1:
                 first = [(rpm["file"], rpm["sha256"]) for rpm in rebuilds[0]["rpms"]]
-                report["repeatable_by_rpm_sha256"] = all(
+                repeatable = all(
                     [(rpm["file"], rpm["sha256"]) for rpm in rebuild["rpms"]] == first
                     for rebuild in rebuilds[1:]
                 )
+
+            report = {
+                "version": ASSESSMENT_VERSION,
+                "metadata": comparison["metadata"],
+                "input_artifacts": _input_artifacts_summary(
+                    published_rpm_summary=published_rpm_summary,
+                    task_srpm_summary=task_srpm_summary,
+                    log_summaries=log_summaries,
+                    source_rpm_summary=source_rpm_summary,
+                    source_rpm_type=source_rpm_type,
+                    source_rpm_url=source_rpm_url,
+                    task_id=resolution.buildarch_task["id"],
+                    srpm_cross_check=srpm_cross_check,
+                ),
+                "build_environment": _build_environment_summary(
+                    args,
+                    resolution=resolution,
+                    repo_probe=repo_probe,
+                    mock_cfg=mock_cfg,
+                ),
+                "rebuild": _rebuild_summary(
+                    args,
+                    "rebuilt",
+                    rebuilds=rebuilds,
+                    repeatable=repeatable,
+                ),
+                "analysis": comparison["analysis"],
+                "overall_assessment": comparison["overall_assessment"],
+                "diff_items": comparison["diff_items"],
+                "summary_stats": comparison["summary_stats"],
+            }
+        else:
+            report = {
+                "version": ASSESSMENT_VERSION,
+                "metadata": {
+                    "package_name": target_rpm_name,
+                    "reference_url": published_rpm_url,
+                    "reference_sha256": published_rpm_summary.get("sha256"),
+                    "rebuild_sha256": None,
+                    "analysis_time": _analysis_time(),
+                },
+                "input_artifacts": _input_artifacts_summary(
+                    published_rpm_summary=published_rpm_summary,
+                    task_srpm_summary=task_srpm_summary,
+                    log_summaries=log_summaries,
+                    source_rpm_summary=source_rpm_summary,
+                    source_rpm_type=source_rpm_type,
+                    source_rpm_url=source_rpm_url,
+                    task_id=resolution.buildarch_task["id"],
+                    srpm_cross_check=srpm_cross_check,
+                ),
+                "build_environment": _build_environment_summary(
+                    args,
+                    resolution=resolution,
+                    repo_probe=repo_probe,
+                    mock_cfg=mock_cfg,
+                ),
+                "rebuild": _rebuild_summary(args, "failed", rebuilds=rebuilds),
+                "analysis": _analysis_summary(),
+            }
+            report.update(_unavailable_assessment("mock_rebuild", confidence=0.8))
 
         write_json(run_dir / "report.json", report)
         print(f"[guanfu] Koji RPM rebuild report: {run_dir / 'report.json'}")
         return 0 if successful else 1
     except Exception as exc:
-        report["status"] = "error"
-        report["error"] = repr(exc)
+        report["rebuild"] = _rebuild_summary(args, "error", error=repr(exc))
+        report.update(_unavailable_assessment("rebuild_pipeline", confidence=0.7))
         write_json(run_dir / "report.json", report)
         print(f"[guanfu] ERROR: {exc}", file=sys.stderr)
         print(f"[guanfu] Partial report: {run_dir / 'report.json'}", file=sys.stderr)
