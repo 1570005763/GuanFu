@@ -88,19 +88,25 @@ def _limited_files(paths):
 def _new_diff_item(
     diff_type,
     risk_level,
-    description,
     affected_files=None,
     fields=None,
-    analysis_status="analyzed",
-    confidence=0.9,
     possible_diff_types=None,
+    expected_environment=False,
+    explained=False,
+    unexpected=False,
+    security_relevant=False,
+    needs_deep_analysis=False,
+    unresolved=False,
 ):
     item = {
         "diff_type": diff_type,
         "risk_level": risk_level,
-        "analysis_status": analysis_status,
-        "confidence": confidence,
-        "description": description,
+        "_expected_environment": expected_environment,
+        "_explained": explained,
+        "_unexpected": unexpected,
+        "_security_relevant": security_relevant,
+        "_needs_deep_analysis": needs_deep_analysis,
+        "_unresolved": unresolved,
     }
     if fields:
         item["fields"] = sorted(fields)
@@ -112,6 +118,18 @@ def _new_diff_item(
     if possible_diff_types:
         item["possible_diff_types"] = possible_diff_types
     return item
+
+
+def _public_diff_item(item):
+    return dict((key, value) for key, value in item.items() if not key.startswith("_"))
+
+
+def _public_diff_items(items):
+    return [_public_diff_item(item) for item in items]
+
+
+def _affected_count(item):
+    return item.get("affected_file_count", 1)
 
 
 def _is_buildid_path(path):
@@ -195,6 +213,10 @@ def _path_risk(paths, default_risk="medium"):
     return risk
 
 
+def _paths_security_relevant(paths):
+    return any(_is_sensitive_path(path) for path in paths)
+
+
 def _permission_risk(entries):
     risk = "low"
     for entry in entries:
@@ -205,6 +227,15 @@ def _permission_risk(entries):
         elif _is_sensitive_path(entry["path"]):
             risk = _risk_at_least("medium", risk)
     return risk
+
+
+def _permission_security_relevant(entries):
+    for entry in entries:
+        if _has_special_exec_bit(entry["published"]) or _has_special_exec_bit(entry["rebuilt"]):
+            return True
+        if _is_sensitive_path(entry["path"]):
+            return True
+    return False
 
 
 def _classify_header_differences(header_diff):
@@ -229,43 +260,36 @@ def _classify_header_differences(header_diff):
         items.append(_new_diff_item(
             "RPM_SIGNATURE",
             "low",
-            "RPM signature-related header fields differ.",
             fields=signature_fields,
-            confidence=0.95,
+            expected_environment=True,
         ))
     if metadata_fields:
         items.append(_new_diff_item(
             "RPM_METADATA",
             "low",
-            "RPM build metadata or wrapper digests differ.",
             fields=metadata_fields,
-            confidence=0.9,
+            expected_environment=True,
         ))
     if compression_fields:
         items.append(_new_diff_item(
             "COMPRESSION",
             "none",
-            "RPM payload compression settings differ.",
             fields=compression_fields,
-            confidence=0.9,
+            explained=True,
         ))
     if identity_fields:
         items.append(_new_diff_item(
             "OTHER",
             "medium",
-            "RPM identity or package size header fields differ.",
             fields=identity_fields,
-            analysis_status="needs_review",
-            confidence=0.7,
+            unresolved=True,
         ))
     if other_fields:
         items.append(_new_diff_item(
             "OTHER",
             "medium",
-            "Unclassified RPM header fields differ.",
             fields=other_fields,
-            analysis_status="needs_review",
-            confidence=0.65,
+            unresolved=True,
         ))
     return items
 
@@ -275,9 +299,7 @@ def _classify_file_differences(files_diff, file_analysis):
         return [_new_diff_item(
             "OTHER",
             "high",
-            "RPM file manifest comparison failed.",
-            analysis_status="needs_review",
-            confidence=0.5,
+            unresolved=True,
         )]
 
     if not file_analysis:
@@ -295,27 +317,24 @@ def _classify_file_differences(files_diff, file_analysis):
         items.append(_new_diff_item(
             "BUILDID_SYMLINK",
             "none",
-            ".build-id symlink entries were added or removed.",
             affected_files=buildid_added + buildid_removed,
-            confidence=0.85,
+            expected_environment=True,
         ))
     if added:
         items.append(_new_diff_item(
             "FILE_ADDED",
             _path_risk(added, "medium"),
-            "Files exist only in the rebuilt RPM.",
             affected_files=added,
-            analysis_status="needs_review",
-            confidence=0.75,
+            unexpected=True,
+            security_relevant=_paths_security_relevant(added),
         ))
     if removed:
         items.append(_new_diff_item(
             "FILE_REMOVED",
             _path_risk(removed, "medium"),
-            "Files exist only in the published RPM.",
             affected_files=removed,
-            analysis_status="needs_review",
-            confidence=0.75,
+            unexpected=True,
+            security_relevant=_paths_security_relevant(removed),
         ))
 
     mtime_only = []
@@ -376,107 +395,94 @@ def _classify_file_differences(files_diff, file_analysis):
         items.append(_new_diff_item(
             "FILE_TIMESTAMP",
             "none",
-            "File mtimes differ while content and attributes are equal.",
             affected_files=mtime_only,
-            confidence=0.98,
+            expected_environment=True,
         ))
     if permission_entries:
         items.append(_new_diff_item(
             "FILE_PERMISSION",
             _permission_risk(permission_entries),
-            "File mode, owner, group, or device metadata differs.",
             affected_files=[entry["path"] for entry in permission_entries],
-            analysis_status="needs_review",
-            confidence=0.85,
+            unexpected=True,
+            security_relevant=_permission_security_relevant(permission_entries),
         ))
     if buildid_symlink_paths:
         items.append(_new_diff_item(
             "BUILDID_SYMLINK",
             "none",
-            ".build-id symlink targets or entries differ.",
             affected_files=buildid_symlink_paths,
-            confidence=0.8,
+            expected_environment=True,
         ))
     if symlink_paths:
         items.append(_new_diff_item(
             "SYMLINK_TARGET",
             _path_risk(symlink_paths, "low"),
-            "Symlink targets differ.",
             affected_files=symlink_paths,
-            analysis_status="needs_review",
-            confidence=0.8,
+            explained=not _paths_security_relevant(symlink_paths),
+            unexpected=_paths_security_relevant(symlink_paths),
+            security_relevant=_paths_security_relevant(symlink_paths),
         ))
     if compressed_content:
         items.append(_new_diff_item(
             "COMPRESSION",
             "low",
-            "Compressed documentation differs; light mode did not decompress logical content.",
             affected_files=compressed_content,
-            analysis_status="needs_deep_analysis",
-            confidence=0.4,
-            possible_diff_types=["COMPRESSION", "DOC_CONTENT"],
+            possible_diff_types=["DOC_CONTENT"],
+            unexpected=True,
+            needs_deep_analysis=True,
         ))
     if doc_content:
         items.append(_new_diff_item(
             "DOC_CONTENT",
             "low",
-            "Documentation content differs.",
             affected_files=doc_content,
-            confidence=0.8,
+            explained=True,
         ))
     if config_content:
         items.append(_new_diff_item(
             "CONFIG_CONTENT",
             _path_risk(config_content, "low"),
-            "Configuration file content differs.",
             affected_files=config_content,
-            analysis_status="needs_review",
-            confidence=0.8,
+            unexpected=True,
+            security_relevant=_paths_security_relevant(config_content),
         ))
     if script_content:
         items.append(_new_diff_item(
             "SCRIPT_CONTENT",
             _path_risk(script_content, "medium"),
-            "Packaged script file content differs.",
             affected_files=script_content,
-            analysis_status="needs_review",
-            confidence=0.75,
+            security_relevant=True,
         ))
     if debug_content:
         items.append(_new_diff_item(
             "DEBUG_INFO",
             "low",
-            "Debug information content differs.",
             affected_files=debug_content,
-            confidence=0.75,
+            explained=True,
         ))
     if binary_candidates:
         items.append(_new_diff_item(
             "OTHER",
             "medium",
-            "Executable or library content differs; light mode did not inspect ELF sections or BuildID.",
             affected_files=binary_candidates,
-            analysis_status="needs_deep_analysis",
-            confidence=0.35,
             possible_diff_types=["BINARY_CODE", "BINARY_BUILDID", "DEBUG_INFO"],
+            needs_deep_analysis=True,
+            unresolved=True,
         ))
     if other_content:
         items.append(_new_diff_item(
             "OTHER",
             "medium",
-            "File content differs and was not classified by light rules.",
             affected_files=other_content,
-            analysis_status="needs_deep_analysis",
-            confidence=0.35,
+            needs_deep_analysis=True,
+            unresolved=True,
         ))
     if other_metadata:
         items.append(_new_diff_item(
             "OTHER",
             "low",
-            "RPM file flags differ and were not classified by light rules.",
             affected_files=other_metadata,
-            analysis_status="needs_review",
-            confidence=0.6,
+            unexpected=True,
         ))
     return items
 
@@ -487,9 +493,7 @@ def _classify_dependency_and_scriptlet_differences(requires_equal, provides_equa
         items.append(_new_diff_item(
             "SCRIPT_CONTENT",
             "high",
-            "RPM scriptlets differ.",
-            analysis_status="needs_review",
-            confidence=0.9,
+            security_relevant=True,
         ))
     changed = []
     if not requires_equal:
@@ -500,89 +504,97 @@ def _classify_dependency_and_scriptlet_differences(requires_equal, provides_equa
         items.append(_new_diff_item(
             "OTHER",
             "medium",
-            "RPM dependency metadata differs.",
             fields=changed,
-            analysis_status="needs_review",
-            confidence=0.75,
+            security_relevant=True,
         ))
     return items
 
 
-def _summarize_diff_items(diff_items):
+def _summarize_diff_items(items):
+    public_items = _public_diff_items(items)
     by_risk = dict((level, 0) for level in RISK_LEVELS)
     by_type = {}
-    for item in diff_items:
+    for item in public_items:
         risk = item.get("risk_level", "none")
         diff_type = item.get("diff_type", "OTHER")
         by_risk[risk] = by_risk.get(risk, 0) + 1
         by_type[diff_type] = by_type.get(diff_type, 0) + 1
     return {
         "total_diff_types": len(by_type),
-        "total_diff_items": len(diff_items),
+        "total_diff_items": len(public_items),
         "diff_by_risk_level": by_risk,
         "diff_by_type": by_type,
         "needs_deep_analysis_count": len([
-            item for item in diff_items
-            if item.get("analysis_status") == "needs_deep_analysis"
-        ]),
-        "needs_review_count": len([
-            item for item in diff_items
-            if item.get("analysis_status") == "needs_review"
+            item for item in items
+            if item.get("_needs_deep_analysis")
         ]),
     }
 
 
-def _assessment_confidence(diff_items):
-    if not diff_items:
-        return 1.0
-    return round(min(item.get("confidence", 0.5) for item in diff_items), 2)
+def _unexpected_affected_count(items):
+    return sum(
+        _affected_count(item)
+        for item in items
+        if item.get("_unexpected")
+    )
 
 
-def _build_overall_assessment(rpm_file_sha256_equal, diff_items):
+def _trust_level(rpm_file_sha256_equal, items):
     if rpm_file_sha256_equal:
-        return {
-            "risk_level": "none",
-            "action": "pass",
-            "reproducible": True,
-            "confidence": 1.0,
-            "trust_level": "L4",
-            "conclusion": "Published and rebuilt RPM files are byte-identical.",
-        }
+        return "L4"
 
-    highest = _highest_risk(diff_items)
-    has_deep_gap = any(
-        item.get("analysis_status") == "needs_deep_analysis"
-        for item in diff_items
-    )
-    has_review_gap = any(
-        item.get("analysis_status") == "needs_review"
-        for item in diff_items
-    )
+    if any(item.get("_security_relevant") for item in items):
+        return "L0"
+    if any(item.get("_unresolved") for item in items):
+        return "L0"
 
-    if highest in ("critical", "high"):
-        trust_level = "L0"
-        action = "block"
-        conclusion = "High-risk or security-sensitive differences were found."
-    elif highest == "medium":
-        trust_level = "L1"
-        action = "review"
-        conclusion = "Unexpected or unresolved medium-risk differences were found."
-    elif has_deep_gap or has_review_gap:
-        trust_level = "L1"
-        action = "review"
-        conclusion = "Low-risk differences need review because light analysis could not fully explain them."
-    else:
-        trust_level = "L3"
-        action = "pass"
-        conclusion = "Only expected rebuild wrapper or timestamp differences were found by light analysis."
+    non_expected = [
+        item for item in items
+        if not item.get("_expected_environment")
+    ]
+    if not non_expected:
+        return "L3"
 
+    if all(item.get("_explained") for item in non_expected):
+        return "L2"
+
+    if _unexpected_affected_count(items) <= 3:
+        return "L1"
+    return "L0"
+
+
+def _action_for_trust_level(trust_level):
+    if trust_level in ("L4", "L3"):
+        return "approve"
+    if trust_level in ("L2", "L1"):
+        return "review"
+    return "reject"
+
+
+def _assessment_confidence(trust_level, items):
+    if trust_level == "L4":
+        return 1.0
+    if any(item.get("_unresolved") for item in items):
+        return 0.55
+    if any(item.get("_needs_deep_analysis") for item in items):
+        return 0.6
+    if trust_level == "L3":
+        return 0.9
+    if trust_level == "L2":
+        return 0.8
+    if trust_level == "L1":
+        return 0.7
+    return 0.85
+
+
+def _build_overall_assessment(rpm_file_sha256_equal, items):
+    trust_level = _trust_level(rpm_file_sha256_equal, items)
     return {
-        "risk_level": highest,
-        "action": action,
-        "reproducible": False,
-        "confidence": _assessment_confidence(diff_items),
+        "risk_level": "none" if rpm_file_sha256_equal else _highest_risk(items),
+        "action": _action_for_trust_level(trust_level),
+        "reproducible": bool(rpm_file_sha256_equal),
+        "confidence": _assessment_confidence(trust_level, items),
         "trust_level": trust_level,
-        "conclusion": conclusion,
     }
 
 
@@ -607,24 +619,26 @@ def build_light_assessment(
     provides_equal,
     scripts_equal,
 ):
-    diff_items = []
+    internal_items = []
     if not rpm_file_sha256_equal:
-        diff_items.extend(_classify_header_differences(header_diff))
-        diff_items.extend(_classify_file_differences(files_diff, file_analysis))
-        diff_items.extend(_classify_dependency_and_scriptlet_differences(
+        internal_items.extend(_classify_header_differences(header_diff))
+        internal_items.extend(_classify_file_differences(files_diff, file_analysis))
+        internal_items.extend(_classify_dependency_and_scriptlet_differences(
             requires_equal,
             provides_equal,
             scripts_equal,
         ))
 
     return {
-        "analysis_mode": "light",
-        "analysis_capabilities": _analysis_capabilities(),
-        "unsupported_precise_types": UNSUPPORTED_PRECISE_TYPES,
+        "analysis": {
+            "mode": "light",
+            "capabilities": _analysis_capabilities(),
+            "unsupported_precise_types": UNSUPPORTED_PRECISE_TYPES,
+        },
         "overall_assessment": _build_overall_assessment(
             rpm_file_sha256_equal,
-            diff_items,
+            internal_items,
         ),
-        "diff_items": diff_items,
-        "summary_stats": _summarize_diff_items(diff_items),
+        "diff_items": _public_diff_items(internal_items),
+        "summary_stats": _summarize_diff_items(internal_items),
     }

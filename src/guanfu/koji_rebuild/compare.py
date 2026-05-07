@@ -52,13 +52,6 @@ def _rpm_command_lines(path, option):
     return sorted(out.splitlines())
 
 
-def _rpm_dump(path):
-    out, err = _run_text(["rpm", "-qp", "--dump", str(path)])
-    if err:
-        return {"error": err}
-    return sorted(out.splitlines())
-
-
 def _rpm_dump_map(path):
     out, err = _run_text(["rpm", "-qp", "--dump", str(path)])
     if err:
@@ -243,8 +236,46 @@ def compare_published_and_rebuilt(published_rpm, result_rpms, target_filename, r
     rebuilt = _find_rebuilt_rpm(result_rpms, target_filename)
     if not rebuilt:
         return {
-            "status": "missing_rebuilt_target_rpm",
-            "target_filename": target_filename,
+            "version": ASSESSMENT_VERSION,
+            "metadata": {
+                "package_name": target_filename,
+                "reference_url": reference_url,
+                "reference_sha256": sha256_file(published),
+                "rebuild_sha256": None,
+                "analysis_time": _analysis_time(),
+            },
+            "overall_assessment": {
+                "risk_level": "critical",
+                "action": "reject",
+                "reproducible": False,
+                "confidence": 0.9,
+                "trust_level": "L0",
+            },
+            "diff_items": [
+                {
+                    "diff_type": "OTHER",
+                    "risk_level": "critical",
+                    "fields": ["rebuilt_target_rpm"],
+                }
+            ],
+            "summary_stats": {
+                "total_diff_types": 1,
+                "total_diff_items": 1,
+                "diff_by_risk_level": {
+                    "none": 0,
+                    "low": 0,
+                    "medium": 0,
+                    "high": 0,
+                    "critical": 1,
+                },
+                "diff_by_type": {"OTHER": 1},
+                "needs_deep_analysis_count": 0,
+            },
+            "analysis": {
+                "mode": "light",
+                "capabilities": {},
+                "unsupported_precise_types": [],
+            },
         }
 
     published_requires = _rpm_command_lines(published, "--requires")
@@ -253,9 +284,6 @@ def compare_published_and_rebuilt(published_rpm, result_rpms, target_filename, r
     rebuilt_provides = _rpm_command_lines(rebuilt, "--provides")
     published_scripts = _rpm_command_lines(published, "--scripts")
     rebuilt_scripts = _rpm_command_lines(rebuilt, "--scripts")
-    published_dump = _rpm_dump(published)
-    rebuilt_dump = _rpm_dump(rebuilt)
-
     published_headers = _rpm_query(published)
     rebuilt_headers = _rpm_query(rebuilt)
     header_diff = _diff_headers(published_headers, rebuilt_headers)
@@ -266,7 +294,6 @@ def compare_published_and_rebuilt(published_rpm, result_rpms, target_filename, r
     requires_equal = published_requires == rebuilt_requires
     provides_equal = published_provides == rebuilt_provides
     scripts_equal = published_scripts == rebuilt_scripts
-    dump_equal = published_dump == rebuilt_dump
     assessment = build_light_assessment(
         rpm_file_sha256_equal,
         header_diff,
@@ -279,33 +306,12 @@ def compare_published_and_rebuilt(published_rpm, result_rpms, target_filename, r
 
     result = {
         "version": ASSESSMENT_VERSION,
-        "status": "compared",
-        "target_filename": target_filename,
         "metadata": {
             "package_name": target_filename,
             "reference_url": reference_url,
             "reference_sha256": published_sha256,
             "rebuild_sha256": rebuilt_sha256,
             "analysis_time": _analysis_time(),
-        },
-        "published": {
-            "file": str(published),
-            "sha256": published_sha256,
-            "headers": published_headers,
-        },
-        "rebuilt": {
-            "file": str(rebuilt),
-            "sha256": rebuilt_sha256,
-            "headers": rebuilt_headers,
-        },
-        "rpm_file_sha256_equal": rpm_file_sha256_equal,
-        "requires_equal": requires_equal,
-        "provides_equal": provides_equal,
-        "scripts_equal": scripts_equal,
-        "dump_equal": dump_equal,
-        "differences": {
-            "headers": header_diff,
-            "files": files_diff,
         },
     }
     result.update(assessment)
