@@ -184,6 +184,7 @@ def run_koji_rpm_rebuild(args):
                 published_rpm,
                 first_run_rpms,
                 target_rpm_name,
+                reference_url=published_rpm_url,
             )
             if len(rebuilds) > 1:
                 first = [(rpm["file"], rpm["sha256"]) for rpm in rebuilds[0]["rpms"]]
