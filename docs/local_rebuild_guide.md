@@ -72,6 +72,13 @@ guanfu rebuild koji-rpm \
 4. 使用 `mock --rebuild` 在本地重建发布 SRPM
 5. 对比发布 RPM 和本地 rebuild RPM，并输出 `report.json`
 
+`report.json` 会包含轻量差异摘要：
+
+- RPM header 字段差异，例如 `BUILDTIME`、`BUILDHOST`、`PAYLOADDIGEST`、`RSAHEADER`
+- 文件清单差异，例如只存在于发布 RPM 或 rebuild RPM 的文件
+- 文件属性差异，例如 `mtime`、`digest`、`size`、`mode`、owner/group
+- 汇总判断，例如是否仅有 mtime 差异、是否存在内容相关差异
+
 默认 Koji 配置：
 
 ```text
