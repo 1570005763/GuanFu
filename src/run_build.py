@@ -97,6 +97,7 @@ def setup_default_environment() -> None:
 %clamp_mtime_to_source_date_epoch 1
 %use_source_date_epoch_as_buildtime 1
 %_buildhost reproducible
+%_source_payload w.ufdio
 """
     with open('/etc/rpm/macros.buildroot', 'w') as f:
         f.write(rpm_macros_content)
