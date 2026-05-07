@@ -9,6 +9,7 @@ A GitHub Action for **reproducible container-based builds**. GuanFu reads a decl
 - **Reproducible builds** — Pre-configured `SOURCE_DATE_EPOCH`, RPM macros, and Rust compiler flags for bit-for-bit reproducibility.
 - **Input management** — Download remote artifacts or mount local files into the build container, with optional SHA-256 verification.
 - **Multi-OS support** — Built-in runners for Anolis OS and Alibaba Cloud Linux, extensible to other distributions.
+- **Local CLI** — Use `guanfu` to run the existing buildspec rebuild flow or rebuild published OpenAnolis Koji RPMs locally.
 - **Release workflow** — Reusable GitHub Actions workflow with SLSA provenance generation and optional Rekor transparency log upload.
 
 ## Quick Start
@@ -68,6 +69,35 @@ outputs:
 
 See [docs/buildspec.md](docs/buildspec.md) for the full specification.
 
+### Local CLI
+
+From a source checkout:
+
+```bash
+python3 -m pip install -e .
+```
+
+Run the existing buildspec rebuild flow through the unified CLI:
+
+```bash
+guanfu rebuild buildspec --spec buildspec.yaml
+```
+
+The legacy script entry point remains supported:
+
+```bash
+./src/build-runner.sh buildspec.yaml
+```
+
+Rebuild a published OpenAnolis Koji RPM locally:
+
+```bash
+guanfu rebuild koji-rpm \
+  --rpm-name zlib-1.2.13-3.an23.x86_64.rpm
+```
+
+Koji RPM rebuild requires a Linux host with `koji`, `mock`, `rpm`, and `dnf`.
+
 ## Action Inputs
 
 | Input       | Description               | Required | Default          |
@@ -100,8 +130,10 @@ See [docs/workflow_usage_guide.md](docs/workflow_usage_guide.md) for details.
 
 ```
 ├── action.yml                  # GitHub Action definition
+├── pyproject.toml              # Python package and guanfu console script
 ├── src/
 │   ├── build-runner.sh         # Entry point — sets up Docker and mounts
+│   ├── guanfu/                 # Unified local CLI and Koji RPM rebuild modules
 │   ├── run_build.py            # Main build orchestrator (runs inside container)
 │   ├── validate_buildspec.py   # Validates buildspec paths
 │   └── os_runners/             # OS-specific package installation
