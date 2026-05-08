@@ -15,7 +15,7 @@ on:
         type: string
         default: ""
       release_slsa_provenance:
-        description: "Whether to release SLSA provenance"
+        description: "Whether to release RV release manifest"
         required: false
         type: boolean
         default: false
@@ -25,15 +25,15 @@ on:
         type: boolean
         default: false
       upload_provenance_to_rekor:
-        description: "Whether to upload provenance to Rekor"
+        description: "Whether to upload release manifest DSSE to Rekor"
         required: false
         type: boolean
         default: false
       provenance_name:
-        description: "Name of the provenance file"
+        description: "Name of the release manifest bundle file"
         required: false
         type: string
-        default: "slsa-provenance.intoto.jsonl"
+        default: "rv-release-manifest.bundle.json"
       release_tag_name:
         description: "Release tag name"
         required: true
@@ -43,6 +43,10 @@ on:
         required: false
         type: boolean
         default: false
+    secrets:
+      RV_RELEASE_SIGN_KEY:
+        description: "PEM private key used to sign the RV release manifest DSSE"
+        required: false
 
 jobs:
   # Job 1: 发布
@@ -103,9 +107,9 @@ jobs:
           name: ${{ inputs.output_artifact }}
           path: outputs/
 
-      # 3. 生成输入/输出文件哈希（用于 SLSA provenance）
+      # 3. 生成输入/输出文件哈希（用于 RV release manifest measurements）
       # This step generates SHA256 hashes for all input/output files and exports:
-      # - IO_SUBJECTS_B64: base64-encoded hash list for SLSA provenance (via GITHUB_ENV)
+      # - IO_SUBJECTS_B64: base64-encoded hash list for release manifest generation (via GITHUB_ENV)
       - name: Generate hashes for input and output files
         id: generate-io-hashes
         if: inputs.release_slsa_provenance == true
@@ -187,7 +191,7 @@ jobs:
 
       # 5. 合并所有 subjects
       # This step combines io_subjects and rpm_subjects (if available) into a single base64-encoded output:
-      # - subjects: base64-encoded combined hash list for SLSA provenance
+      # - subjects: base64-encoded combined hash list for release manifest generation
       - name: Combine subjects
         id: combine
         run: |
@@ -221,97 +225,136 @@ jobs:
           combined_b64=$(printf '%s' "$all_subjects" | base64 -w0)
           echo "subjects=$combined_b64" >> "$GITHUB_OUTPUT"
 
-  # Job 3: 生成 SLSA Provenance
+      - name: Generate RV release manifest DSSE
+        env:
+          COMBINED_SUBJECTS_B64: ${{ steps.combine.outputs.subjects }}
+          RV_RELEASE_SIGN_KEY: ${{ secrets.RV_RELEASE_SIGN_KEY }}
+          REKOR_URL: ${{ vars.REKOR_URL || 'https://rekor.sigstore.dev' }}
+          UPLOAD_TO_REKOR: ${{ inputs.upload_provenance_to_rekor }}
+          BUNDLE_NAME: ${{ inputs.provenance_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-manifest
+          subjects_txt="release-manifest/subjects.txt"
+          echo "$COMBINED_SUBJECTS_B64" | base64 -d > "$subjects_txt"
+
+          python3 - "$subjects_txt" release-manifest/release_payload.json <<'PY'
+import json
+import re
+import sys
+from collections import OrderedDict
+
+subjects_path, output_path = sys.argv[1], sys.argv[2]
+measurements = {}
+with open(subjects_path, "r", encoding="utf-8") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        digest, name = line.split(None, 1)
+        safe = re.sub(r"[^a-zA-Z0-9_]+", "_", name.strip()).strip("_").lower()
+        if not safe:
+            safe = "artifact"
+        key = "cvm_container_{}".format(safe)
+        suffix = 2
+        while key in measurements and measurements[key]["value"] != digest:
+            key = "cvm_container_{}_{}".format(safe, suffix)
+            suffix += 1
+        measurements[key] = {"algorithm": "sha256", "value": digest.lower()}
+
+payload = OrderedDict()
+payload["measurements"] = OrderedDict(sorted(measurements.items()))
+payload["schemaVersion"] = 1
+with open(output_path, "w", encoding="utf-8") as f:
+    f.write(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+PY
+
+          if [ -n "$RV_RELEASE_SIGN_KEY" ]; then
+            printf '%s\n' "$RV_RELEASE_SIGN_KEY" > release-manifest/release.key
+          else
+            echo "WARN: RV_RELEASE_SIGN_KEY is not set; generating an ephemeral signing key for this release manifest." >&2
+            openssl ecparam -name prime256v1 -genkey -noout -out release-manifest/release.key
+          fi
+          openssl pkey -in release-manifest/release.key -pubout -out release-manifest/release.pub
+
+          python3 - release-manifest/release_payload.json release-manifest/release.pae <<'PY'
+import sys
+payload_type = b"application/vnd.trustee.rv.release+json"
+with open(sys.argv[1], "rb") as f:
+    payload = f.read()
+pae = b"DSSEv1 %d " % len(payload_type) + payload_type + b" %d " % len(payload) + payload
+with open(sys.argv[2], "wb") as f:
+    f.write(pae)
+PY
+          openssl dgst -sha256 -sign release-manifest/release.key -out release-manifest/release.sig release-manifest/release.pae
+          payload_b64=$(base64 -w0 release-manifest/release_payload.json)
+          sig_b64=$(base64 -w0 release-manifest/release.sig)
+          jq -n \
+            --arg payload "$payload_b64" \
+            --arg sig "$sig_b64" \
+            '{payload: $payload, payloadType: "application/vnd.trustee.rv.release+json", signatures: [{sig: $sig}]}' \
+            > release-manifest/release.dsse.json
+
+          if [ "$UPLOAD_TO_REKOR" = "true" ]; then
+            envelope=$(jq -c . release-manifest/release.dsse.json)
+            verifier=$(base64 -w0 release-manifest/release.pub)
+            jq -n \
+              --arg envelope "$envelope" \
+              --arg verifier "$verifier" \
+              '{kind:"dsse",apiVersion:"0.0.1",spec:{proposedContent:{envelope:$envelope,verifiers:[$verifier]}}}' \
+              > release-manifest/rekor-v1-request.json
+            code=$(curl -sS -o release-manifest/rekor-v1-entry.json -w '%{http_code}' \
+              -X POST "${REKOR_URL%/}/api/v1/log/entries" \
+              -H 'Content-Type: application/json' \
+              --data-binary @release-manifest/rekor-v1-request.json)
+            if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+              echo "Failed to upload RV release manifest to Rekor, HTTP ${code}" >&2
+              cat release-manifest/rekor-v1-entry.json >&2 || true
+              exit 1
+            fi
+            jq -n \
+              --argfile releasePayload release-manifest/release_payload.json \
+              --argfile dsse release-manifest/release.dsse.json \
+              --argfile rekor release-manifest/rekor-v1-entry.json \
+              '{releasePayload:$releasePayload,dsseEnvelope:$dsse,rekorEntryV1:$rekor}' \
+              > "release-manifest/${BUNDLE_NAME}"
+          else
+            jq -n \
+              --argfile releasePayload release-manifest/release_payload.json \
+              --argfile dsse release-manifest/release.dsse.json \
+              '{releasePayload:$releasePayload,dsseEnvelope:$dsse}' \
+              > "release-manifest/${BUNDLE_NAME}"
+          fi
+
+      - name: Upload RV release manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rv-release-manifest
+          if-no-files-found: error
+          path: |
+            release-manifest/*.json
+
+  # Job 3: 发布 RV release manifest metadata
   provenance:
-    name: Generate SLSA Provenance
-    needs: [prepare]
+    name: Publish RV Release Manifest
+    runs-on: ubuntu-22.04
+    needs: [release, prepare]
     if: inputs.release_slsa_provenance == true
     permissions:
       actions: read
-      id-token: write
       contents: write
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
-    with:
-      compile-generator: false
-      provenance-name: ${{ inputs.provenance_name }}
-      base64-subjects: ${{ needs.prepare.outputs.combined_subjects }}
-      upload-assets: true
-
-  # Job 4: 上传 Provenance 到 Rekor
-  upload-rekor-provenance:
-    name: Upload Provenance to Rekor
-    runs-on: ubuntu-22.04
-    needs: [provenance]
-    if: inputs.upload_provenance_to_rekor == true
     steps:
-      - name: Download provenance files from release
-        run: |
-          set -euo pipefail
-          
-          # Create directory for provenance files
-          mkdir -p provenance-files
-          cd provenance-files
-          
-          # Get release assets using GitHub API
-          assets_url=$(curl -s \
-            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ inputs.release_tag_name }}" \
-            | jq -r '.assets[] | select(.name | endswith(".intoto.jsonl")) | .browser_download_url')
-          
-          # Download each .intoto.jsonl file
-          echo "Downloading provenance files..."
-          while IFS= read -r url; do
-            if [ -n "$url" ]; then
-              filename=$(basename "$url")
-              echo "Downloading $filename"
-              curl -L "$url" -o "$filename"
-            fi
-          done <<< "$assets_url"
-          
-          # List downloaded files
-          echo "Downloaded files:"
-          ls -la
+      - name: Download RV release manifest artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rv-release-manifest
+          path: release-manifest
 
-      - name: Install rekor-cli for intoto uploads
-        run: |
-          set -euo pipefail
-          REKOR_VERSION="v1.3.6"
-          curl -L "https://github.com/sigstore/rekor/releases/download/${REKOR_VERSION}/rekor-cli-linux-amd64" -o rekor-cli
-          chmod +x rekor-cli
-          sudo mv rekor-cli /usr/local/bin/rekor-cli
-
-      - name: Upload provenance to Rekor using intoto entries
-        env:
-          REKOR_URL: ${{ vars.REKOR_URL || 'https://rekor.sigstore.dev' }}
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-
-          cd provenance-files
-
-          for bundle in *.intoto.jsonl; do
-            echo "Processing provenance bundle: ${bundle}"
-            
-            # Skip if no files match the pattern
-            if [ ! -f "$bundle" ]; then
-              echo "No .intoto.jsonl files found"
-              break
-            fi
-
-            # Extract DSSE envelope from the Sigstore bundle (support both v0.3+ layouts)
-            jq '.dsseEnvelope // .content.dsseEnvelope' "${bundle}" > dsse-envelope.json
-
-            # Extract signing certificate (leaf cert) and convert to PEM.
-            # Prefer top-level certificate.rawBytes; fall back to x509CertificateChain[0].rawBytes if present.
-            jq -r '.verificationMaterial.certificate.rawBytes // .verificationMaterial.x509CertificateChain.certificates[0].rawBytes' "${bundle}" | base64 -d > cert.der
-            openssl x509 -inform DER -in cert.der -out cert.pem
-
-            # Upload an intoto entry which, when attestation storage is enabled on Rekor,
-            # stores the decoded DSSE payload bytes.
-            rekor-cli upload \
-              --rekor_server "${REKOR_URL}" \
-              --type intoto \
-              --public-key cert.pem \
-              --artifact dsse-envelope.json
-
-            rm -f dsse-envelope.json cert.der cert.pem
-          done
+      - name: Upload RV release manifest to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: true
+          prerelease: ${{ inputs.prerelease }}
+          tag_name: ${{ inputs.release_tag_name }}
+          files: |
+            release-manifest/*.json
