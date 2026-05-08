@@ -15,7 +15,7 @@ on:
         type: string
         default: ""
       release_slsa_provenance:
-        description: "Whether to release RV release manifest"
+        description: "Whether to release SLSA provenance and RV release manifest"
         required: false
         type: boolean
         default: false
@@ -30,7 +30,12 @@ on:
         type: boolean
         default: false
       provenance_name:
-        description: "Name of the release manifest bundle file"
+        description: "Name of the SLSA provenance file"
+        required: false
+        type: string
+        default: "slsa-provenance.intoto.jsonl"
+      rv_release_manifest_name:
+        description: "Name of the RV release manifest bundle file"
         required: false
         type: string
         default: "rv-release-manifest.bundle.json"
@@ -107,9 +112,9 @@ jobs:
           name: ${{ inputs.output_artifact }}
           path: outputs/
 
-      # 3. 生成输入/输出文件哈希（用于 RV release manifest measurements）
+      # 3. 生成输入/输出文件哈希（用于 SLSA provenance subjects 和 RV release manifest measurements）
       # This step generates SHA256 hashes for all input/output files and exports:
-      # - IO_SUBJECTS_B64: base64-encoded hash list for release manifest generation (via GITHUB_ENV)
+      # - IO_SUBJECTS_B64: base64-encoded hash list for SLSA provenance and release manifest generation (via GITHUB_ENV)
       - name: Generate hashes for input and output files
         id: generate-io-hashes
         if: inputs.release_slsa_provenance == true
@@ -191,14 +196,14 @@ jobs:
 
       # 5. 合并所有 subjects
       # This step combines io_subjects and rpm_subjects (if available) into a single base64-encoded output:
-      # - subjects: base64-encoded combined hash list for release manifest generation
+      # - subjects: base64-encoded combined hash list for SLSA provenance and release manifest generation
       - name: Combine subjects
         id: combine
         run: |
           set -euo pipefail
 
-          io_subjects_b64="$IO_SUBJECTS_B64"
-          rpm_subjects_b64="$RPM_SUBJECTS_B64"
+          io_subjects_b64="${IO_SUBJECTS_B64:-}"
+          rpm_subjects_b64="${RPM_SUBJECTS_B64:-}"
 
           if [ -z "$io_subjects_b64" ]; then
             echo "ERROR: io_subjects is empty" >&2
@@ -231,7 +236,7 @@ jobs:
           RV_RELEASE_SIGN_KEY: ${{ secrets.RV_RELEASE_SIGN_KEY }}
           REKOR_URL: ${{ vars.REKOR_URL || 'https://rekor.sigstore.dev' }}
           UPLOAD_TO_REKOR: ${{ inputs.upload_provenance_to_rekor }}
-          BUNDLE_NAME: ${{ inputs.provenance_name }}
+          BUNDLE_NAME: ${{ inputs.rv_release_manifest_name }}
         run: |
           set -euo pipefail
           mkdir -p release-manifest
@@ -239,35 +244,35 @@ jobs:
           echo "$COMBINED_SUBJECTS_B64" | base64 -d > "$subjects_txt"
 
           python3 - "$subjects_txt" release-manifest/release_payload.json <<'PY'
-import json
-import re
-import sys
-from collections import OrderedDict
+          import json
+          import re
+          import sys
+          from collections import OrderedDict
 
-subjects_path, output_path = sys.argv[1], sys.argv[2]
-measurements = {}
-with open(subjects_path, "r", encoding="utf-8") as f:
-    for line in f:
-        line = line.strip()
-        if not line:
-            continue
-        digest, name = line.split(None, 1)
-        safe = re.sub(r"[^a-zA-Z0-9_]+", "_", name.strip()).strip("_").lower()
-        if not safe:
-            safe = "artifact"
-        key = "cvm_container_{}".format(safe)
-        suffix = 2
-        while key in measurements and measurements[key]["value"] != digest:
-            key = "cvm_container_{}_{}".format(safe, suffix)
-            suffix += 1
-        measurements[key] = {"algorithm": "sha256", "value": digest.lower()}
+          subjects_path, output_path = sys.argv[1], sys.argv[2]
+          measurements = {}
+          with open(subjects_path, "r", encoding="utf-8") as f:
+              for line in f:
+                  line = line.strip()
+                  if not line:
+                      continue
+                  digest, name = line.split(None, 1)
+                  safe = re.sub(r"[^a-zA-Z0-9_]+", "_", name.strip()).strip("_").lower()
+                  if not safe:
+                      safe = "artifact"
+                  key = safe
+                  suffix = 2
+                  while key in measurements and measurements[key]["value"] != digest:
+                      key = "{}_{}".format(safe, suffix)
+                      suffix += 1
+                  measurements[key] = {"algorithm": "sha256", "value": digest.lower()}
 
-payload = OrderedDict()
-payload["measurements"] = OrderedDict(sorted(measurements.items()))
-payload["schemaVersion"] = 1
-with open(output_path, "w", encoding="utf-8") as f:
-    f.write(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
-PY
+          payload = OrderedDict()
+          payload["measurements"] = OrderedDict(sorted(measurements.items()))
+          payload["schemaVersion"] = 1
+          with open(output_path, "w", encoding="utf-8") as f:
+              f.write(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+          PY
 
           if [ -n "$RV_RELEASE_SIGN_KEY" ]; then
             printf '%s\n' "$RV_RELEASE_SIGN_KEY" > release-manifest/release.key
@@ -278,14 +283,14 @@ PY
           openssl pkey -in release-manifest/release.key -pubout -out release-manifest/release.pub
 
           python3 - release-manifest/release_payload.json release-manifest/release.pae <<'PY'
-import sys
-payload_type = b"application/vnd.trustee.rv.release+json"
-with open(sys.argv[1], "rb") as f:
-    payload = f.read()
-pae = b"DSSEv1 %d " % len(payload_type) + payload_type + b" %d " % len(payload) + payload
-with open(sys.argv[2], "wb") as f:
-    f.write(pae)
-PY
+          import sys
+          payload_type = b"application/vnd.trustee.rv.release+json"
+          with open(sys.argv[1], "rb") as f:
+              payload = f.read()
+          pae = b"DSSEv1 %d " % len(payload_type) + payload_type + b" %d " % len(payload) + payload
+          with open(sys.argv[2], "wb") as f:
+              f.write(pae)
+          PY
           openssl dgst -sha256 -sign release-manifest/release.key -out release-manifest/release.sig release-manifest/release.pae
           payload_b64=$(base64 -w0 release-manifest/release_payload.json)
           sig_b64=$(base64 -w0 release-manifest/release.sig)
@@ -334,8 +339,24 @@ PY
           path: |
             release-manifest/*.json
 
-  # Job 3: 发布 RV release manifest metadata
+  # Job 3: 生成并发布 SLSA provenance
   provenance:
+    name: Generate SLSA Provenance
+    needs: [prepare]
+    if: inputs.release_slsa_provenance == true
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      compile-generator: false
+      provenance-name: ${{ inputs.provenance_name }}
+      base64-subjects: ${{ needs.prepare.outputs.combined_subjects }}
+      upload-assets: true
+
+  # Job 4: 发布 RV release manifest metadata
+  rv-release-manifest:
     name: Publish RV Release Manifest
     runs-on: ubuntu-22.04
     needs: [release, prepare]
