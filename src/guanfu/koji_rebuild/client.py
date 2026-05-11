@@ -9,6 +9,12 @@ class KojiClient:
     def get_rpm(self, rpm_info):
         return self.session.getRPM(rpm_info, True, False)
 
+    def get_rpm_optional(self, rpm_info):
+        return self.session.getRPM(rpm_info, False, False)
+
+    def get_external_repo_list(self, tag_info, event=None):
+        return self.session.getExternalRepoList(tag_info, event)
+
     def get_build(self, build_id):
         return self.session.getBuild(build_id, True)
 

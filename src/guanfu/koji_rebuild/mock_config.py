@@ -1,7 +1,11 @@
+import re
 import subprocess
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+
+CONTAINER_MOCKBUILD_UID = 1000
 
 
 def historical_repo_url(koji_topurl, buildroot):
@@ -40,3 +44,28 @@ def generate_mock_config(koji_server, koji_topurl, buildroot_id, dest):
     ]
     subprocess.run(cmd, check=True)
     return dest
+
+
+def enforce_nonroot_mock_build_user(
+    mock_cfg,
+    uid=CONTAINER_MOCKBUILD_UID,
+):
+    """Keep rpmbuild/%check from running as root inside containerized mock."""
+    mock_cfg = Path(mock_cfg)
+    text = mock_cfg.read_text()
+    text = _upsert_config_opt(text, "chrootuid", uid)
+    mock_cfg.write_text(text)
+    return mock_cfg
+
+
+def _upsert_config_opt(text, key, value):
+    line = f"config_opts['{key}'] = {value}"
+    pattern = r"(?m)^config_opts\[['\"]%s['\"]\]\s*=.*$" % key
+    replaced, count = re.subn(pattern, line, text)
+    if count:
+        return replaced
+    if not text.endswith("\n"):
+        text += "\n"
+    if "# GuanFu container mock user override." not in text:
+        text += "\n# GuanFu container mock user override.\n"
+    return text + line + "\n"

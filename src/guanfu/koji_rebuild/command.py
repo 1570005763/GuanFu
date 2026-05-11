@@ -1,3 +1,4 @@
+import os
 import re
 import sys
 import time
@@ -7,15 +8,29 @@ from pathlib import Path
 from guanfu.koji_rebuild.assessment import ASSESSMENT_VERSION
 from guanfu.koji_rebuild.client import KojiClient
 from guanfu.koji_rebuild.compare import compare_published_and_rebuilt, compare_srpms
+from guanfu.koji_rebuild.container_executor import (
+    build_container_command,
+    container_executor_summary,
+    default_container_image,
+    detect_target_os,
+    environment_executor_summary,
+    is_supported_target_os,
+    run_container_command,
+    select_container_runtime,
+)
 from guanfu.koji_rebuild.downloader import (
     download_task_output,
     join_url,
     summarize_file,
     try_download_url,
 )
-from guanfu.koji_rebuild.mock_config import generate_mock_config, probe_repodata
+from guanfu.koji_rebuild.mock_config import enforce_nonroot_mock_build_user, generate_mock_config, probe_repodata
 from guanfu.koji_rebuild.mock_runner import run_rebuild
 from guanfu.koji_rebuild.report import write_json
+from guanfu.koji_rebuild.repo_fallback import (
+    prepare_installed_pkgs_fallback,
+    summarize_fallback_report,
+)
 from guanfu.koji_rebuild.resolver import resolve_koji_build
 from guanfu.koji_rebuild.rpm_name import parse_rpm_filename, rpm_filename
 
@@ -91,9 +106,17 @@ def _srpm_cross_check_summary(cross_check):
     }
 
 
-def _build_environment_summary(args, resolution=None, repo_probe=None, mock_cfg=None):
+def _build_environment_summary(
+    args,
+    resolution=None,
+    repo_probe=None,
+    mock_cfg=None,
+    repo_fallback=None,
+    executor=None,
+):
     buildroot = resolution.buildroot if resolution else {}
     environment = {
+        "executor": executor or environment_executor_summary(args),
         "koji_server": args.koji_server,
         "koji_topurl": args.koji_topurl,
         "buildroot_id": buildroot.get("id"),
@@ -105,6 +128,8 @@ def _build_environment_summary(args, resolution=None, repo_probe=None, mock_cfg=
     }
     if mock_cfg:
         environment["mock_config"] = _public_artifact(summarize_file(mock_cfg))
+    if repo_fallback:
+        environment["repo_fallback"] = summarize_fallback_report(repo_fallback)
     return _without_none(environment)
 
 
@@ -122,16 +147,42 @@ def _rebuild_summary(args, status, rebuilds=None, repeatable=None, reason=None, 
     if repeatable is not None:
         summary["repeatable_by_rpm_sha256"] = repeatable
     if rebuilds:
+        diagnosis = _first_failure_diagnosis(rebuilds)
+        if diagnosis:
+            summary["failure_diagnosis"] = diagnosis
         summary["runs_detail"] = [
-            {
-                "run": item.get("run"),
-                "exit_code": item.get("exit_code"),
-                "elapsed_seconds": item.get("elapsed_seconds"),
-                "rpms": [_public_artifact(rpm) for rpm in item.get("rpms", [])],
-            }
+            _without_none(
+                {
+                    "run": item.get("run"),
+                    "exit_code": item.get("exit_code"),
+                    "elapsed_seconds": item.get("elapsed_seconds"),
+                    "rpms": [_public_artifact(rpm) for rpm in item.get("rpms", [])],
+                    "failure_diagnosis": item.get("failure_diagnosis"),
+                }
+            )
             for item in rebuilds
         ]
     return summary
+
+
+def _first_failure_diagnosis(rebuilds):
+    for item in rebuilds or []:
+        diagnosis = item.get("failure_diagnosis")
+        if diagnosis:
+            return diagnosis
+    return None
+
+
+def _print_rebuild_failure_diagnosis(result):
+    diagnosis = result.get("failure_diagnosis")
+    if not diagnosis:
+        return
+    print(f"[guanfu] Mock failure diagnosis: {diagnosis.get('summary')}", file=sys.stderr)
+    print(f"[guanfu] Suggested action: {diagnosis.get('suggested_action')}", file=sys.stderr)
+    evidence = diagnosis.get("evidence") or []
+    if evidence:
+        item = evidence[0]
+        print(f"[guanfu] Evidence: {item.get('log')}: {item.get('line')}", file=sys.stderr)
 
 
 def _unavailable_assessment(field, confidence=0.9):
@@ -182,6 +233,129 @@ def _analysis_summary():
     }
 
 
+def _prepare_mock_config_for_execution(mock_cfg):
+    if os.environ.get("GUANFU_EXECUTOR_MODE") == "container" and os.environ.get("GUANFU_IN_CONTAINER") == "1":
+        enforce_nonroot_mock_build_user(mock_cfg)
+    return mock_cfg
+
+
+def _find_report_paths(workdir, rpm_name):
+    base = Path(workdir).expanduser().resolve() / _safe_name(Path(rpm_name).name)
+    if not base.exists():
+        return []
+    return sorted(base.glob("**/report.json"))
+
+
+def _write_preflight_report(args, status, reason, resolution=None, executor=None, error=None, assessment_field=None):
+    run_dir = _run_dir(args.workdir, args.rpm_name)
+    target_name = rpm_filename(resolution.rpm) if resolution else args.rpm_name
+    report = {
+        "version": ASSESSMENT_VERSION,
+        "metadata": {
+            "package_name": target_name,
+            "analysis_time": _analysis_time(),
+        },
+        "input_artifacts": {},
+        "build_environment": _build_environment_summary(
+            args,
+            resolution=resolution,
+            executor=executor,
+        ),
+        "rebuild": _rebuild_summary(args, status, reason=reason, error=error),
+        "analysis": _analysis_summary(),
+    }
+    if assessment_field:
+        report.update(_unavailable_assessment(assessment_field))
+    write_json(run_dir / "report.json", report)
+    return run_dir / "report.json"
+
+
+def _run_containerized_koji_rpm_rebuild(args):
+    try:
+        rpm_info = parse_rpm_filename(args.rpm_name)
+        client = KojiClient(args.koji_server)
+        resolution = resolve_koji_build(client, rpm_info)
+        target_os = detect_target_os(rpm_info, resolution.buildroot)
+    except Exception as exc:
+        report_path = _write_preflight_report(
+            args,
+            "error",
+            "container executor preflight failed",
+            error=repr(exc),
+            assessment_field="container_preflight",
+        )
+        print(f"[guanfu] Container preflight failed: {exc}", file=sys.stderr)
+        print(f"[guanfu] Partial report: {report_path}", file=sys.stderr)
+        return 1
+
+    if not is_supported_target_os(target_os):
+        executor = container_executor_summary(target_os=target_os)
+        report_path = _write_preflight_report(
+            args,
+            "unsupported",
+            "only an23 Koji RPM rebuild is currently supported by the container executor",
+            resolution=resolution,
+            executor=executor,
+            assessment_field="unsupported_target",
+        )
+        print(
+            "[guanfu] Unsupported Koji RPM target for container executor: "
+            f"tag={resolution.buildroot.get('tag_name')!r}",
+            file=sys.stderr,
+        )
+        print(f"[guanfu] Partial report: {report_path}", file=sys.stderr)
+        return 3
+
+    image = getattr(args, "container_image", None) or default_container_image(target_os)
+    try:
+        runtime = select_container_runtime(getattr(args, "container_runtime", "auto"))
+    except Exception as exc:
+        executor = container_executor_summary(
+            image=image,
+            target_os=target_os,
+            privileged=getattr(args, "container_privileged", True),
+        )
+        report_path = _write_preflight_report(
+            args,
+            "error",
+            "container runtime is not available",
+            resolution=resolution,
+            executor=executor,
+            error=repr(exc),
+            assessment_field="container_runtime",
+        )
+        print(f"[guanfu] Container runtime is not available: {exc}", file=sys.stderr)
+        print(f"[guanfu] Partial report: {report_path}", file=sys.stderr)
+        return 2
+
+    workdir = Path(args.workdir).expanduser().resolve()
+    workdir.mkdir(parents=True, exist_ok=True)
+    command = build_container_command(args, runtime, image, workdir)
+    before_reports = set(_find_report_paths(workdir, args.rpm_name))
+    exit_code = run_container_command(command)
+    after_reports = set(_find_report_paths(workdir, args.rpm_name))
+
+    if exit_code != 0 and after_reports == before_reports:
+        executor = container_executor_summary(
+            runtime=runtime,
+            image=image,
+            target_os=target_os,
+            privileged=getattr(args, "container_privileged", True),
+            command=command,
+        )
+        report_path = _write_preflight_report(
+            args,
+            "error",
+            "container executor did not produce a rebuild report",
+            resolution=resolution,
+            executor=executor,
+            error=f"container command exited with code {exit_code}",
+            assessment_field="container_executor",
+        )
+        print(f"[guanfu] Container executor did not produce a report: {report_path}", file=sys.stderr)
+    return exit_code
+
+
 def _input_artifacts_summary(
     published_rpm_summary=None,
     task_srpm_summary=None,
@@ -230,6 +404,13 @@ def run_koji_rpm_rebuild(args):
         print("--runs must be >= 1", file=sys.stderr)
         return 2
 
+    executor = getattr(args, "executor", "local")
+    if executor == "container" and os.environ.get("GUANFU_IN_CONTAINER") == "1":
+        executor = "local"
+        args.executor = "local"
+    if executor == "container":
+        return _run_containerized_koji_rpm_rebuild(args)
+
     run_dir = _run_dir(args.workdir, args.rpm_name)
     inputs_dir = run_dir / "inputs"
     results_dir = run_dir / "results"
@@ -264,23 +445,6 @@ def run_koji_rpm_rebuild(args):
 
         repo_probe = probe_repodata(args.koji_topurl, resolution.buildroot)
         write_json(metadata_dir / "repo-probe.json", repo_probe)
-        if repo_probe.get("status") != 200:
-            report["metadata"]["package_name"] = target_rpm_name
-            report["metadata"]["analysis_time"] = _analysis_time()
-            report["build_environment"] = _build_environment_summary(
-                args,
-                resolution=resolution,
-                repo_probe=repo_probe,
-            )
-            report["rebuild"] = _rebuild_summary(
-                args,
-                "skipped",
-                reason="original buildroot repo repomd.xml is not available",
-            )
-            report.update(_unavailable_assessment("historical_repo"))
-            write_json(run_dir / "report.json", report)
-            print(f"[guanfu] Historical repo is not available: {repo_probe.get('url')}", file=sys.stderr)
-            return 3
 
         published_rpm_url = join_url(args.binary_rpm_base_url, target_rpm_name)
         published_rpm, published_rpm_summary = _download_published(
@@ -330,14 +494,156 @@ def run_koji_rpm_rebuild(args):
             resolution.buildroot["id"],
             mock_cfg,
         )
+        _prepare_mock_config_for_execution(mock_cfg)
+        active_mock_cfg = mock_cfg
+        repo_fallback = None
+
+        if repo_probe.get("status") != 200:
+            if getattr(args, "repo_fallback", "installed-pkgs") == "none":
+                report = {
+                    "version": ASSESSMENT_VERSION,
+                    "metadata": {
+                        "package_name": target_rpm_name,
+                        "reference_url": published_rpm_url,
+                        "reference_sha256": published_rpm_summary.get("sha256"),
+                        "rebuild_sha256": None,
+                        "analysis_time": _analysis_time(),
+                    },
+                    "input_artifacts": _input_artifacts_summary(
+                        published_rpm_summary=published_rpm_summary,
+                        task_srpm_summary=task_srpm_summary,
+                        log_summaries=log_summaries,
+                        source_rpm_summary=source_rpm_summary,
+                        source_rpm_type=source_rpm_type,
+                        source_rpm_url=source_rpm_url,
+                        task_id=resolution.buildarch_task["id"],
+                        srpm_cross_check=srpm_cross_check,
+                    ),
+                    "build_environment": _build_environment_summary(
+                        args,
+                        resolution=resolution,
+                        repo_probe=repo_probe,
+                        mock_cfg=mock_cfg,
+                    ),
+                    "rebuild": _rebuild_summary(
+                        args,
+                        "skipped",
+                        reason="original buildroot repo repomd.xml is not available",
+                    ),
+                    "analysis": _analysis_summary(),
+                }
+                report.update(_unavailable_assessment("historical_repo"))
+                write_json(run_dir / "report.json", report)
+                print(f"[guanfu] Historical repo is not available: {repo_probe.get('url')}", file=sys.stderr)
+                return 3
+
+            installed_pkgs_log = inputs_dir / "installed_pkgs.log"
+            if not installed_pkgs_log.exists():
+                repo_fallback = {
+                    "strategy": "installed_pkgs_log",
+                    "status": "unavailable",
+                    "source_task_id": resolution.buildarch_task["id"],
+                    "dependency_recovery": {
+                        "total": 0,
+                        "resolved_by_getRPM": 0,
+                        "unresolved": 0,
+                        "payloadhash_mismatch": 0,
+                        "task_output_available": 0,
+                        "missing_task_output": 0,
+                        "downloaded": 0,
+                        "download_errors": 0,
+                    },
+                    "error": "installed_pkgs.log was not found in Koji task output",
+                }
+            else:
+                try:
+                    repo_fallback = prepare_installed_pkgs_fallback(
+                        client,
+                        resolution.buildroot,
+                        installed_pkgs_log,
+                        mock_cfg,
+                        inputs_dir / "mock-fallback-installed-pkgs.cfg",
+                        run_dir / "fallback-repo",
+                        metadata_dir,
+                        resolution.buildarch_task["id"],
+                    )
+                except Exception as exc:
+                    repo_fallback = {
+                        "strategy": "installed_pkgs_log",
+                        "status": "error",
+                        "source_task_id": resolution.buildarch_task["id"],
+                        "installed_pkgs_log": _public_artifact(
+                            summarize_file(installed_pkgs_log),
+                            source_type="koji_task_output",
+                            task_id=resolution.buildarch_task["id"],
+                        ),
+                        "dependency_recovery": {
+                            "total": 0,
+                            "resolved_by_getRPM": 0,
+                            "unresolved": 0,
+                            "payloadhash_mismatch": 0,
+                            "task_output_available": 0,
+                            "missing_task_output": 0,
+                            "downloaded": 0,
+                            "download_errors": 0,
+                        },
+                        "error": repr(exc),
+                    }
+            write_json(metadata_dir / "repo-fallback.json", repo_fallback)
+
+            if repo_fallback.get("status") != "ready":
+                report = {
+                    "version": ASSESSMENT_VERSION,
+                    "metadata": {
+                        "package_name": target_rpm_name,
+                        "reference_url": published_rpm_url,
+                        "reference_sha256": published_rpm_summary.get("sha256"),
+                        "rebuild_sha256": None,
+                        "analysis_time": _analysis_time(),
+                    },
+                    "input_artifacts": _input_artifacts_summary(
+                        published_rpm_summary=published_rpm_summary,
+                        task_srpm_summary=task_srpm_summary,
+                        log_summaries=log_summaries,
+                        source_rpm_summary=source_rpm_summary,
+                        source_rpm_type=source_rpm_type,
+                        source_rpm_url=source_rpm_url,
+                        task_id=resolution.buildarch_task["id"],
+                        srpm_cross_check=srpm_cross_check,
+                    ),
+                    "build_environment": _build_environment_summary(
+                        args,
+                        resolution=resolution,
+                        repo_probe=repo_probe,
+                        mock_cfg=mock_cfg,
+                        repo_fallback=repo_fallback,
+                    ),
+                    "rebuild": _rebuild_summary(
+                        args,
+                        "skipped",
+                        reason="historical repo is unavailable and installed_pkgs fallback is incomplete",
+                    ),
+                    "analysis": _analysis_summary(),
+                }
+                report.update(_unavailable_assessment("dependency_recovery"))
+                write_json(run_dir / "report.json", report)
+                print(
+                    "[guanfu] Historical repo is not available and installed_pkgs fallback is incomplete",
+                    file=sys.stderr,
+                )
+                return 3
+
+            active_mock_cfg = inputs_dir / "mock-fallback-installed-pkgs.cfg"
+            _prepare_mock_config_for_execution(active_mock_cfg)
 
         rebuilds = []
         for run_index in range(1, args.runs + 1):
             resultdir = results_dir / f"result-run-{run_index}"
-            result = run_rebuild(mock_cfg, srpm_for_rebuild, resultdir, isolation=args.isolation)
+            result = run_rebuild(active_mock_cfg, srpm_for_rebuild, resultdir, isolation=args.isolation)
             result["run"] = run_index
             rebuilds.append(result)
             if result["exit_code"] != 0:
+                _print_rebuild_failure_diagnosis(result)
                 break
 
         successful = rebuilds and all(item["exit_code"] == 0 for item in rebuilds)
@@ -374,7 +680,8 @@ def run_koji_rpm_rebuild(args):
                     args,
                     resolution=resolution,
                     repo_probe=repo_probe,
-                    mock_cfg=mock_cfg,
+                    mock_cfg=active_mock_cfg,
+                    repo_fallback=repo_fallback,
                 ),
                 "rebuild": _rebuild_summary(
                     args,
@@ -411,7 +718,8 @@ def run_koji_rpm_rebuild(args):
                     args,
                     resolution=resolution,
                     repo_probe=repo_probe,
-                    mock_cfg=mock_cfg,
+                    mock_cfg=active_mock_cfg,
+                    repo_fallback=repo_fallback,
                 ),
                 "rebuild": _rebuild_summary(args, "failed", rebuilds=rebuilds),
                 "analysis": _analysis_summary(),
