@@ -1,15 +1,18 @@
 # GuanFu
 
-A GitHub Action for **reproducible container-based builds**. GuanFu reads a declarative `buildspec.yaml`, launches a container, and executes build phases inside it — producing deterministic, auditable artifacts.
+GuanFu is a reproducible rebuild toolkit. It supports the original declarative
+`buildspec.yaml` container workflow, and also provides a local CLI path for
+rebuilding published OpenAnolis Koji RPMs inside a controlled VM executor.
 
 ## Features
 
 - **Declarative build specs** — Define container image, inputs, environment, build phases, and outputs in a single YAML file.
-- **Container isolation** — All builds run inside Docker containers for consistency across environments.
+- **Buildspec container isolation** — Declarative buildspec rebuilds run inside Docker containers for consistency across environments.
 - **Reproducible builds** — Pre-configured `SOURCE_DATE_EPOCH`, RPM macros, and Rust compiler flags for bit-for-bit reproducibility.
 - **Input management** — Download remote artifacts or mount local files into the build container, with optional SHA-256 verification.
 - **Multi-OS support** — Built-in runners for Anolis OS and Alibaba Cloud Linux, extensible to other distributions.
 - **Local CLI** — Use `guanfu` to run the existing buildspec rebuild flow or rebuild published OpenAnolis Koji RPMs locally.
+- **Koji RPM VM rebuild** — Resolve published RPMs back to Koji build metadata, SRPMs, mock configs, and logs; rebuild them in an an23 VM and compare against release RPMs.
 - **Release workflow** — Reusable GitHub Actions workflow with SLSA provenance generation and optional Rekor transparency log upload.
 
 ## Quick Start
@@ -96,7 +99,9 @@ guanfu rebuild koji-rpm \
   --rpm-name zlib-1.2.13-3.an23.x86_64.rpm
 ```
 
-Koji RPM rebuild requires a Linux host with `koji`, `createrepo_c`, and QEMU.
+Koji RPM rebuild currently supports an23 RPMs and requires a Linux host with
+`koji` plus QEMU/libguestfs tooling. `createrepo_c` is required when GuanFu must
+reconstruct a temporary repo from `installed_pkgs.log`.
 The default Koji executor is `--executor vm`; it uses KVM when `/dev/kvm` is
 available and otherwise falls back to slow degraded QEMU TCG. Use
 `--vm-require-kvm` for strict trusted runs. The default an23 VM image is:
@@ -106,8 +111,9 @@ installing system packages automatically. The host needs `qemu-img` and
 `virt-customize` to prepare the VM overlay. GuanFu uses QEMU 9p sharing when
 available, and falls back to `virt-copy-in` / `virt-copy-out` when the host QEMU
 lacks 9p support. By default the qcow2 overlay is prepared with `mock,rpm-build`
-before boot. Use `--executor local` only for host mock diagnostics or
-compatibility.
+before boot. `--executor local` remains available for compatibility and host
+mock diagnostics, but it shares the host kernel/CPU boundary and is not the
+default trusted route.
 
 ## Action Inputs
 
@@ -154,18 +160,25 @@ See [docs/workflow_usage_guide.md](docs/workflow_usage_guide.md) for details.
 ├── .github/workflows/
 │   └── release.yml             # Reusable release + SLSA provenance workflow
 └── docs/
-    ├── buildspec.md            # Buildspec YAML specification
-    ├── local_rebuild_guide.md  # Local build guide
-    └── workflow_usage_guide.md # CI workflow usage guide
+    ├── buildspec.md                         # Buildspec YAML specification
+    ├── local_rebuild_guide.md               # Local build and Koji RPM rebuild guide
+    ├── koji_bootstrap_toolchain_fallback.md # Future strict bootstrap fallback design
+    └── workflow_usage_guide.md              # CI workflow usage guide
 ```
 
 ## Supported Operating Systems
+
+For the buildspec container workflow:
 
 | OS                  | Status    |
 |---------------------|-----------|
 | Anolis OS           | Supported |
 | Alibaba Cloud Linux | Supported |
 | Others              | Extensible via `OsRunnerBase` |
+
+For Koji RPM VM rebuild, this PR currently supports OpenAnolis an23 RPMs. Other
+targets such as an8, alinux3, and alinux4 are intentionally left to future
+policy support.
 
 ## License
 
