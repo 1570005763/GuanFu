@@ -126,7 +126,7 @@ def build_parser():
         help=(
             "Fallback strategy when the original Koji buildroot repo is unavailable. "
             "installed-pkgs reconstructs a temporary local repo from installed_pkgs.log, "
-            "Koji task outputs, event-time external repos, and local mock bootstrap tooling."
+            "Koji task outputs, and event-time external repos, then disables mock bootstrap."
         ),
     )
     koji.set_defaults(func=run_koji_rpm_rebuild)
