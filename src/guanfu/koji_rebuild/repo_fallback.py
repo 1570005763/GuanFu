@@ -455,6 +455,28 @@ def _discover_bootstrap_toolchain(mock_cfg):
     }
 
 
+def _disabled_bootstrap_toolchain(mock_cfg):
+    toolchain = _discover_bootstrap_toolchain(mock_cfg)
+    original_use_bootstrap = toolchain.get("use_bootstrap")
+    original_use_bootstrap_image = toolchain.get("use_bootstrap_image")
+    toolchain.update(
+        {
+            "status": "disabled",
+            "use_bootstrap": False,
+            "use_bootstrap_image": False,
+            "original_use_bootstrap": original_use_bootstrap,
+            "original_use_bootstrap_image": original_use_bootstrap_image,
+            "historical_exactness": "not_applicable",
+            "repo_visibility": "not_added",
+            "reason": (
+                "installed_pkgs fallback disables mock bootstrap and uses the executor "
+                "package manager to create the final buildroot directly"
+            ),
+        }
+    )
+    return toolchain
+
+
 def _infer_releasever(buildroot):
     tag = buildroot.get("tag_name") or ""
     match = re.search(r"an(\d+)", tag)
@@ -463,92 +485,7 @@ def _infer_releasever(buildroot):
     return None
 
 
-def _dnf_download_bootstrap_toolchain(toolchain, buildroot, repo_dir, metadata_dir, external_repos):
-    requested = toolchain.get("requested_packages") or []
-    if not requested:
-        toolchain["status"] = "disabled"
-        return []
-
-    dnf = shutil.which("dnf") or shutil.which("dnf-3")
-    if not dnf:
-        toolchain["status"] = "unavailable"
-        toolchain["error"] = "dnf or dnf-3 is required to resolve mock bootstrap toolchain"
-        return []
-
-    installroot = Path(metadata_dir) / "bootstrap-installroot"
-    installroot.mkdir(parents=True, exist_ok=True)
-    download_dir = Path(metadata_dir) / "bootstrap-downloads"
-    download_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        dnf,
-        "-y",
-        "--nogpgcheck",
-        "--disableplugin=releasever_adapter",
-        "--setopt=reposdir=/dev/null",
-        "--setopt=gpgcheck=0",
-        "--setopt=repo_gpgcheck=0",
-        "--setopt=install_weak_deps=0",
-        "--installroot",
-        str(installroot),
-        "--downloaddir",
-        str(download_dir),
-        "--downloadonly",
-        "--repofrompath",
-        "fallback-buildroot,file://%s" % os.path.abspath(str(repo_dir)),
-        "--enablerepo",
-        "fallback-buildroot",
-    ]
-    releasever = _infer_releasever(buildroot)
-    if releasever:
-        cmd.extend(["--releasever", releasever])
-
-    for index, repo in enumerate(external_repos or []):
-        if repo.get("status") != "ready":
-            continue
-        repo_id = "external-%d-%s" % (index, re.sub(r"[^A-Za-z0-9_.-]+", "_", repo["external_repo_name"]))
-        cmd.extend(["--repofrompath", "%s,%s" % (repo_id, repo["resolved_url"])])
-        cmd.extend(["--enablerepo", repo_id])
-
-    cmd.extend(["install"])
-    cmd.extend(requested)
-
-    before = set(Path(repo_dir).glob("*.rpm"))
-    try:
-        proc = subprocess.run(
-            cmd,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-        )
-        toolchain["resolver_command"] = " ".join(shlex.quote(part) for part in cmd)
-        toolchain["resolver_output"] = proc.stdout[-8000:]
-    except Exception as exc:
-        toolchain["status"] = "incomplete"
-        toolchain["error"] = repr(exc)
-        if hasattr(exc, "stdout") and exc.stdout:
-            toolchain["resolver_output"] = exc.stdout[-8000:]
-        return []
-
-    for path in sorted(download_dir.glob("*.rpm")):
-        shutil.copy2(path, Path(repo_dir) / path.name)
-    after = set(Path(repo_dir).glob("*.rpm"))
-    new_paths = sorted(after - before)
-    artifacts = []
-    for path in new_paths:
-        artifact = summarize_file(path, label="bootstrap_toolchain_rpm")
-        artifact["source_type"] = "mock_bootstrap_toolchain"
-        artifacts.append(artifact)
-    toolchain["status"] = "ready"
-    toolchain["releasever"] = releasever
-    toolchain["downloaded"] = len(artifacts)
-    toolchain["rpms"] = artifacts
-    toolchain["historical_exactness"] = "not_proven"
-    toolchain["repo_visibility"] = "visible_to_bootstrap_and_final_buildroot"
-    return artifacts
-
-
-def rewrite_mock_config_for_local_repo(source_cfg, dest_cfg, repo_dir, releasever=None):
+def rewrite_mock_config_for_local_repo(source_cfg, dest_cfg, repo_dir, releasever=None, disable_bootstrap=False):
     source_cfg = Path(source_cfg)
     dest_cfg = Path(dest_cfg)
     dest_cfg.parent.mkdir(parents=True, exist_ok=True)
@@ -558,8 +495,12 @@ def rewrite_mock_config_for_local_repo(source_cfg, dest_cfg, repo_dir, releaseve
     if count == 0:
         raise RuntimeError("mock.cfg does not contain a repo baseurl to rewrite")
     if releasever and "config_opts['releasever']" not in rewritten and 'config_opts["releasever"]' not in rewritten:
-        rewritten += "\n# Local fallback bootstrap resolver hint.\n"
+        rewritten += "\n# Local fallback releasever hint.\n"
         rewritten += "config_opts['releasever'] = '%s'\n" % releasever
+    if disable_bootstrap:
+        rewritten += "\n# Local installed_pkgs fallback execution policy.\n"
+        rewritten += "config_opts['use_bootstrap'] = False\n"
+        rewritten += "config_opts['use_bootstrap_image'] = False\n"
     dest_cfg.write_text(rewritten)
     return dest_cfg
 
@@ -654,6 +595,11 @@ def summarize_fallback_report(report, max_items=20):
             "releasever": bootstrap.get("releasever"),
             "historical_exactness": bootstrap.get("historical_exactness"),
             "repo_visibility": bootstrap.get("repo_visibility"),
+            "use_bootstrap": bootstrap.get("use_bootstrap"),
+            "use_bootstrap_image": bootstrap.get("use_bootstrap_image"),
+            "original_use_bootstrap": bootstrap.get("original_use_bootstrap"),
+            "original_use_bootstrap_image": bootstrap.get("original_use_bootstrap_image"),
+            "reason": bootstrap.get("reason"),
             "error": bootstrap.get("error"),
         }
         if bootstrap
@@ -839,33 +785,7 @@ def prepare_installed_pkgs_fallback(
         _write_comps(resolved, comps_xml)
         _run_createrepo(repo_dir, comps_xml)
 
-        bootstrap = _discover_bootstrap_toolchain(base_mock_cfg)
-        if bootstrap.get("status") != "disabled":
-            if not external_report and buildroot:
-                external_report = {
-                    "status": "ready",
-                    "event_id": _repo_event(buildroot),
-                    "repos": _external_repo_metadata(client, buildroot, metadata_dir),
-                    "resolved": [],
-                    "unresolved": [],
-                    "verification_failed": [],
-                    "download_errors": [],
-                }
-                if any(repo.get("status") != "ready" for repo in external_report["repos"]):
-                    external_report["status"] = "partial"
-                report["external_repo_recovery"] = external_report
-            bootstrap_artifacts = _dnf_download_bootstrap_toolchain(
-                bootstrap,
-                buildroot or {},
-                repo_dir,
-                metadata_dir,
-                (external_report or {}).get("repos") or [],
-            )
-            downloaded.extend(bootstrap_artifacts)
-            if bootstrap.get("status") not in ("ready", "disabled"):
-                report["bootstrap_toolchain"] = bootstrap
-                return report
-            _run_createrepo(repo_dir, comps_xml)
+        bootstrap = _disabled_bootstrap_toolchain(base_mock_cfg)
         report["bootstrap_toolchain"] = bootstrap
 
         rewrite_mock_config_for_local_repo(
@@ -873,6 +793,7 @@ def prepare_installed_pkgs_fallback(
             fallback_mock_cfg,
             repo_dir,
             releasever=_infer_releasever(buildroot or {}),
+            disable_bootstrap=True,
         )
     except Exception as exc:
         report["status"] = "error"

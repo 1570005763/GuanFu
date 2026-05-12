@@ -66,6 +66,28 @@ class RepoFallbackTests(unittest.TestCase):
 
             self.assertIn("config_opts['releasever'] = '23'", dest.read_text())
 
+    def test_rewrite_mock_config_can_disable_bootstrap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            source = tmp / "mock.cfg"
+            dest = tmp / "mock-fallback.cfg"
+            repo = tmp / "repo"
+            repo.mkdir()
+            source.write_text(
+                "config_opts['use_bootstrap'] = True\n"
+                "config_opts['use_bootstrap_image'] = True\n"
+                "config_opts['yum.conf'] = '[main]\\n"
+                "[build]\\n"
+                "name=build\\n"
+                "baseurl=https://build.openanolis.cn/kojifiles/repos/dist/1/x86_64\\n'\n"
+            )
+
+            rewrite_mock_config_for_local_repo(source, dest, repo, disable_bootstrap=True)
+
+            rewritten = dest.read_text()
+        self.assertIn("config_opts['use_bootstrap'] = False", rewritten)
+        self.assertIn("config_opts['use_bootstrap_image'] = False", rewritten)
+
     def test_external_repo_url_replaces_arch_tokens(self):
         self.assertEqual(
             _replace_repo_arch("https://example.invalid/$arch/os/${arch}/$basearch/", "x86_64"),
@@ -137,11 +159,16 @@ class RepoFallbackTests(unittest.TestCase):
                     ],
                 },
                 "bootstrap_toolchain": {
-                    "status": "ready",
+                    "status": "disabled",
                     "package_manager": "dnf4",
                     "requested_packages": ["python3-dnf"],
-                    "downloaded": 8,
-                    "historical_exactness": "not_proven",
+                    "downloaded": None,
+                    "historical_exactness": "not_applicable",
+                    "use_bootstrap": False,
+                    "use_bootstrap_image": False,
+                    "original_use_bootstrap": True,
+                    "original_use_bootstrap_image": True,
+                    "reason": "installed_pkgs fallback disables mock bootstrap",
                 },
             }
         )
@@ -149,7 +176,9 @@ class RepoFallbackTests(unittest.TestCase):
         self.assertEqual(summary["dependency_recovery"]["resolved_by_external_repo"], 1)
         self.assertEqual(summary["external_repo_recovery"]["resolved"], 1)
         self.assertNotIn("path", summary["external_repo_recovery"]["resolved_items"][0]["artifact"])
-        self.assertEqual(summary["bootstrap_toolchain"]["downloaded"], 8)
+        self.assertEqual(summary["bootstrap_toolchain"]["status"], "disabled")
+        self.assertFalse(summary["bootstrap_toolchain"]["use_bootstrap"])
+        self.assertTrue(summary["bootstrap_toolchain"]["original_use_bootstrap"])
 
 
 if __name__ == "__main__":
