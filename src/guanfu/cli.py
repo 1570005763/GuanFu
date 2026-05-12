@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import os
 import sys
 
 from guanfu import __version__
@@ -30,16 +31,15 @@ def build_parser():
         "koji-rpm",
         help="Rebuild an RPM produced by a Koji instance",
         description=(
-            "Rebuild an RPM produced by a Koji instance. The default executor runs mock "
-            "inside a container. If an old buildroot crashes while executing RPM scriptlets "
-            "or buildroot tools, rerun GuanFu inside a Linux VM with a controlled CPU model; "
-            "a VM can solve host/container CPU or kernel exposure mismatches."
+            "Rebuild an RPM produced by a Koji instance. The default executor runs "
+            "mock inside a Linux VM with a controlled CPU model, kernel, and tool "
+            "surface close to the Koji builder. KVM is trusted; TCG fallback is degraded."
         ),
         epilog=(
-            "VM guidance: container and local executors share the host kernel/CPU exposure. "
-            "For failures such as scriptlet failed with signal 11, segmentation fault, "
-            "illegal instruction, or invalid opcode, use a KVM/QEMU VM close to the Koji "
-            "builder environment and run the same guanfu rebuild koji-rpm command inside it."
+            "VM guidance: --executor vm currently supports an23. By default GuanFu "
+            "downloads the OpenAnolis 23.4 x86_64 qcow2 image from the GA mirror and "
+            "runs it with QEMU/KVM. If /dev/kvm is absent, GuanFu automatically falls "
+            "back to slow degraded QEMU TCG unless --vm-require-kvm is set."
         ),
     )
     source = koji.add_mutually_exclusive_group(required=True)
@@ -78,41 +78,127 @@ def build_parser():
     )
     koji.add_argument(
         "--executor",
-        choices=("container", "local"),
-        default="container",
+        choices=("vm", "local"),
+        default="vm",
         help=(
-            "Rebuild executor. container is the default path; local keeps the existing host "
-            "mock flow. If both hit old buildroot runtime crashes, run GuanFu inside a VM."
+            "Rebuild executor. vm is the default path; local keeps the host mock flow "
+            "for compatibility and diagnostics."
         ),
     )
     koji.add_argument(
-        "--container-runtime",
-        choices=("auto", "podman", "docker"),
-        default="auto",
-        help="Container runtime used by --executor container",
+        "--vm-image",
+        default=os.environ.get("GUANFU_VM_IMAGE"),
+        help=(
+            "VM image path or URL used by --executor vm. Defaults to the OpenAnolis "
+            "23.4 x86_64 GA qcow2 image. Can also be set with GUANFU_VM_IMAGE."
+        ),
     )
     koji.add_argument(
-        "--container-image",
-        help="Container image used by --executor container. Defaults to the an23 GuanFu rebuild image.",
+        "--vm-image-format",
+        default=os.environ.get("GUANFU_VM_IMAGE_FORMAT", "auto"),
+        choices=("auto", "qcow2", "raw"),
+        help="VM image format. Defaults to auto-detection.",
     )
     koji.add_argument(
-        "--container-privileged",
-        dest="container_privileged",
+        "--vm-kernel",
+        default=os.environ.get("GUANFU_VM_KERNEL"),
+        help="Optional kernel image for raw direct-init VM boot. Can also be set with GUANFU_VM_KERNEL.",
+    )
+    koji.add_argument(
+        "--vm-initrd",
+        default=os.environ.get("GUANFU_VM_INITRD"),
+        help="Optional initramfs image for raw direct-init VM boot. Can also be set with GUANFU_VM_INITRD.",
+    )
+    koji.add_argument(
+        "--vm-root-device",
+        default="/dev/vda",
+        help="Root block device inside the VM.",
+    )
+    koji.add_argument(
+        "--vm-qemu-binary",
+        default=os.environ.get("GUANFU_QEMU_BINARY"),
+        help="QEMU binary path. Defaults to qemu-system-x86_64, qemu-kvm, or /usr/libexec/qemu-kvm.",
+    )
+    koji.add_argument(
+        "--vm-qemu-img-binary",
+        default=os.environ.get("GUANFU_QEMU_IMG_BINARY"),
+        help="qemu-img binary path. Defaults to qemu-img.",
+    )
+    koji.add_argument(
+        "--vm-virt-customize-binary",
+        default=os.environ.get("GUANFU_VIRT_CUSTOMIZE_BINARY"),
+        help="virt-customize binary path used to inject the rebuild service into qcow2 images.",
+    )
+    koji.add_argument(
+        "--vm-share-mode",
+        default=os.environ.get("GUANFU_VM_SHARE_MODE", "auto"),
+        choices=("auto", "9p", "image-copy"),
+        help=(
+            "How host inputs/results are exchanged with the VM. auto uses 9p when QEMU "
+            "supports it, otherwise copies inputs into the qcow2 overlay and copies "
+            "results back after shutdown."
+        ),
+    )
+    koji.add_argument(
+        "--vm-prepare-packages",
+        default=os.environ.get("GUANFU_VM_PREPARE_PACKAGES", "mock,rpm-build"),
+        help=(
+            "Comma-separated packages installed into the qcow2 overlay before boot. "
+            "Set to an empty string to skip. Defaults to mock,rpm-build."
+        ),
+    )
+    koji.add_argument(
+        "--vm-virt-copy-in-binary",
+        default=os.environ.get("GUANFU_VIRT_COPY_IN_BINARY"),
+        help="virt-copy-in binary path used by --vm-share-mode image-copy.",
+    )
+    koji.add_argument(
+        "--vm-virt-copy-out-binary",
+        default=os.environ.get("GUANFU_VIRT_COPY_OUT_BINARY"),
+        help="virt-copy-out binary path used by --vm-share-mode image-copy.",
+    )
+    koji.add_argument(
+        "--vm-cpu",
+        default=os.environ.get("GUANFU_VM_CPU", "Cascadelake-Server-v1"),
+        help="QEMU CPU model used by --executor vm.",
+    )
+    koji.add_argument(
+        "--vm-machine",
+        default="q35",
+        help="QEMU machine type used by --executor vm.",
+    )
+    koji.add_argument(
+        "--vm-memory",
+        default=os.environ.get("GUANFU_VM_MEMORY", "4096M"),
+        help="Memory size passed to QEMU.",
+    )
+    koji.add_argument(
+        "--vm-smp",
+        default=os.environ.get("GUANFU_VM_SMP", "2"),
+        help="vCPU count passed to QEMU.",
+    )
+    koji.add_argument(
+        "--vm-timeout",
+        type=int,
+        default=int(os.environ.get("GUANFU_VM_TIMEOUT", "7200")),
+        help="VM execution timeout in seconds.",
+    )
+    koji.add_argument(
+        "--vm-workdir",
+        default="/mnt/guanfu-work",
+        help="Path where the GuanFu run directory is mounted inside the VM.",
+    )
+    koji.add_argument(
+        "--vm-require-kvm",
         action="store_true",
-        default=True,
-        help="Run the rebuild container with --privileged. This is the default.",
-    )
-    koji.add_argument(
-        "--no-container-privileged",
-        dest="container_privileged",
-        action="store_false",
-        help="Do not pass --privileged to the container runtime.",
+        default=os.environ.get("GUANFU_VM_REQUIRE_KVM", "").lower() in ("1", "true", "yes", "on"),
+        help="Fail if /dev/kvm is unavailable instead of automatically falling back to TCG.",
     )
     koji.add_argument(
         "--runs",
         type=int,
         default=1,
-        help="Number of local rebuild runs",
+        help="Number of rebuild runs",
     )
     koji.add_argument(
         "--isolation",
