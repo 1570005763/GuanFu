@@ -1,4 +1,3 @@
-import os
 import re
 import sys
 import time
@@ -8,15 +7,12 @@ from pathlib import Path
 from guanfu.koji_rebuild.assessment import ASSESSMENT_VERSION
 from guanfu.koji_rebuild.client import KojiClient
 from guanfu.koji_rebuild.compare import compare_published_and_rebuilt, compare_srpms
-from guanfu.koji_rebuild.container_executor import (
-    build_container_command,
-    container_executor_summary,
-    default_container_image,
+from guanfu.koji_rebuild.vm_executor import (
     detect_target_os,
-    environment_executor_summary,
     is_supported_target_os,
-    run_container_command,
-    select_container_runtime,
+    parse_koji_recorded_environment,
+    run_vm_rebuild,
+    vm_executor_summary,
 )
 from guanfu.koji_rebuild.downloader import (
     download_task_output,
@@ -24,7 +20,7 @@ from guanfu.koji_rebuild.downloader import (
     summarize_file,
     try_download_url,
 )
-from guanfu.koji_rebuild.mock_config import enforce_nonroot_mock_build_user, generate_mock_config, probe_repodata
+from guanfu.koji_rebuild.mock_config import generate_mock_config, probe_repodata
 from guanfu.koji_rebuild.mock_runner import run_rebuild
 from guanfu.koji_rebuild.report import write_json
 from guanfu.koji_rebuild.repo_fallback import (
@@ -56,7 +52,7 @@ def _run_dir(workdir, rpm_name):
 
 def _download_koji_logs(client, task_id, outputs, inputs_dir):
     downloads = []
-    for log_name in ("build.log", "root.log", "installed_pkgs.log", "mock_output.log"):
+    for log_name in ("build.log", "root.log", "installed_pkgs.log", "mock_output.log", "hw_info.log", "state.log"):
         if log_name in outputs:
             path = download_task_output(client, task_id, log_name, inputs_dir / log_name)
             downloads.append(summarize_file(path, label="koji_task_log"))
@@ -116,7 +112,7 @@ def _build_environment_summary(
 ):
     buildroot = resolution.buildroot if resolution else {}
     environment = {
-        "executor": executor or environment_executor_summary(args),
+        "executor": executor or _environment_executor_summary(args),
         "koji_server": args.koji_server,
         "koji_topurl": args.koji_topurl,
         "buildroot_id": buildroot.get("id"),
@@ -131,6 +127,10 @@ def _build_environment_summary(
     if repo_fallback:
         environment["repo_fallback"] = summarize_fallback_report(repo_fallback)
     return _without_none(environment)
+
+
+def _environment_executor_summary(args):
+    return {"mode": getattr(args, "executor", "local")}
 
 
 def _rebuild_summary(args, status, rebuilds=None, repeatable=None, reason=None, error=None):
@@ -233,12 +233,6 @@ def _analysis_summary():
     }
 
 
-def _prepare_mock_config_for_execution(mock_cfg):
-    if os.environ.get("GUANFU_EXECUTOR_MODE") == "container" and os.environ.get("GUANFU_IN_CONTAINER") == "1":
-        enforce_nonroot_mock_build_user(mock_cfg)
-    return mock_cfg
-
-
 def _find_report_paths(workdir, rpm_name):
     base = Path(workdir).expanduser().resolve() / _safe_name(Path(rpm_name).name)
     if not base.exists():
@@ -268,92 +262,6 @@ def _write_preflight_report(args, status, reason, resolution=None, executor=None
         report.update(_unavailable_assessment(assessment_field))
     write_json(run_dir / "report.json", report)
     return run_dir / "report.json"
-
-
-def _run_containerized_koji_rpm_rebuild(args):
-    try:
-        rpm_info = parse_rpm_filename(args.rpm_name)
-        client = KojiClient(args.koji_server)
-        resolution = resolve_koji_build(client, rpm_info)
-        target_os = detect_target_os(rpm_info, resolution.buildroot)
-    except Exception as exc:
-        report_path = _write_preflight_report(
-            args,
-            "error",
-            "container executor preflight failed",
-            error=repr(exc),
-            assessment_field="container_preflight",
-        )
-        print(f"[guanfu] Container preflight failed: {exc}", file=sys.stderr)
-        print(f"[guanfu] Partial report: {report_path}", file=sys.stderr)
-        return 1
-
-    if not is_supported_target_os(target_os):
-        executor = container_executor_summary(target_os=target_os)
-        report_path = _write_preflight_report(
-            args,
-            "unsupported",
-            "only an23 Koji RPM rebuild is currently supported by the container executor",
-            resolution=resolution,
-            executor=executor,
-            assessment_field="unsupported_target",
-        )
-        print(
-            "[guanfu] Unsupported Koji RPM target for container executor: "
-            f"tag={resolution.buildroot.get('tag_name')!r}",
-            file=sys.stderr,
-        )
-        print(f"[guanfu] Partial report: {report_path}", file=sys.stderr)
-        return 3
-
-    image = getattr(args, "container_image", None) or default_container_image(target_os)
-    try:
-        runtime = select_container_runtime(getattr(args, "container_runtime", "auto"))
-    except Exception as exc:
-        executor = container_executor_summary(
-            image=image,
-            target_os=target_os,
-            privileged=getattr(args, "container_privileged", True),
-        )
-        report_path = _write_preflight_report(
-            args,
-            "error",
-            "container runtime is not available",
-            resolution=resolution,
-            executor=executor,
-            error=repr(exc),
-            assessment_field="container_runtime",
-        )
-        print(f"[guanfu] Container runtime is not available: {exc}", file=sys.stderr)
-        print(f"[guanfu] Partial report: {report_path}", file=sys.stderr)
-        return 2
-
-    workdir = Path(args.workdir).expanduser().resolve()
-    workdir.mkdir(parents=True, exist_ok=True)
-    command = build_container_command(args, runtime, image, workdir)
-    before_reports = set(_find_report_paths(workdir, args.rpm_name))
-    exit_code = run_container_command(command)
-    after_reports = set(_find_report_paths(workdir, args.rpm_name))
-
-    if exit_code != 0 and after_reports == before_reports:
-        executor = container_executor_summary(
-            runtime=runtime,
-            image=image,
-            target_os=target_os,
-            privileged=getattr(args, "container_privileged", True),
-            command=command,
-        )
-        report_path = _write_preflight_report(
-            args,
-            "error",
-            "container executor did not produce a rebuild report",
-            resolution=resolution,
-            executor=executor,
-            error=f"container command exited with code {exit_code}",
-            assessment_field="container_executor",
-        )
-        print(f"[guanfu] Container executor did not produce a report: {report_path}", file=sys.stderr)
-    return exit_code
 
 
 def _input_artifacts_summary(
@@ -404,12 +312,7 @@ def run_koji_rpm_rebuild(args):
         print("--runs must be >= 1", file=sys.stderr)
         return 2
 
-    executor = getattr(args, "executor", "local")
-    if executor == "container" and os.environ.get("GUANFU_IN_CONTAINER") == "1":
-        executor = "local"
-        args.executor = "local"
-    if executor == "container":
-        return _run_containerized_koji_rpm_rebuild(args)
+    executor = getattr(args, "executor", "vm")
 
     run_dir = _run_dir(args.workdir, args.rpm_name)
     inputs_dir = run_dir / "inputs"
@@ -436,6 +339,36 @@ def run_koji_rpm_rebuild(args):
         client = KojiClient(args.koji_server)
         resolution = resolve_koji_build(client, rpm_info)
         target_rpm_name = rpm_filename(resolution.rpm)
+        target_os = detect_target_os(rpm_info, resolution.buildroot)
+
+        if executor == "vm" and not is_supported_target_os(target_os):
+            report = {
+                "version": ASSESSMENT_VERSION,
+                "metadata": {
+                    "package_name": target_rpm_name,
+                    "analysis_time": _analysis_time(),
+                },
+                "input_artifacts": {},
+                "build_environment": _build_environment_summary(
+                    args,
+                    resolution=resolution,
+                    executor=vm_executor_summary(target_os=target_os),
+                ),
+                "rebuild": _rebuild_summary(
+                    args,
+                    "unsupported",
+                    reason="only an23 Koji RPM rebuild is currently supported by the VM executor",
+                ),
+                "analysis": _analysis_summary(),
+            }
+            report.update(_unavailable_assessment("unsupported_target"))
+            write_json(run_dir / "report.json", report)
+            print(
+                "[guanfu] Unsupported Koji RPM target for VM executor: "
+                f"tag={resolution.buildroot.get('tag_name')!r}",
+                file=sys.stderr,
+            )
+            return 3
 
         write_json(metadata_dir / "rpm.json", resolution.rpm)
         write_json(metadata_dir / "build.json", resolution.build)
@@ -474,6 +407,7 @@ def run_koji_rpm_rebuild(args):
             resolution.outputs,
             inputs_dir,
         )
+        koji_recorded_env = parse_koji_recorded_environment(resolution, inputs_dir)
 
         srpm_for_rebuild = published_srpm
         source_rpm_summary = published_srpm_summary
@@ -494,7 +428,6 @@ def run_koji_rpm_rebuild(args):
             resolution.buildroot["id"],
             mock_cfg,
         )
-        _prepare_mock_config_for_execution(mock_cfg)
         active_mock_cfg = mock_cfg
         repo_fallback = None
 
@@ -524,6 +457,11 @@ def run_koji_rpm_rebuild(args):
                         resolution=resolution,
                         repo_probe=repo_probe,
                         mock_cfg=mock_cfg,
+                        executor=(
+                            vm_executor_summary(target_os=target_os, koji_recorded=koji_recorded_env)
+                            if executor == "vm"
+                            else None
+                        ),
                     ),
                     "rebuild": _rebuild_summary(
                         args,
@@ -617,6 +555,11 @@ def run_koji_rpm_rebuild(args):
                         repo_probe=repo_probe,
                         mock_cfg=mock_cfg,
                         repo_fallback=repo_fallback,
+                        executor=(
+                            vm_executor_summary(target_os=target_os, koji_recorded=koji_recorded_env)
+                            if executor == "vm"
+                            else None
+                        ),
                     ),
                     "rebuild": _rebuild_summary(
                         args,
@@ -634,17 +577,32 @@ def run_koji_rpm_rebuild(args):
                 return 3
 
             active_mock_cfg = inputs_dir / "mock-fallback-installed-pkgs.cfg"
-            _prepare_mock_config_for_execution(active_mock_cfg)
 
-        rebuilds = []
-        for run_index in range(1, args.runs + 1):
-            resultdir = results_dir / f"result-run-{run_index}"
-            result = run_rebuild(active_mock_cfg, srpm_for_rebuild, resultdir, isolation=args.isolation)
-            result["run"] = run_index
-            rebuilds.append(result)
-            if result["exit_code"] != 0:
-                _print_rebuild_failure_diagnosis(result)
-                break
+        executor_details = None
+        if executor == "vm":
+            vm_result = run_vm_rebuild(
+                args,
+                run_dir,
+                active_mock_cfg,
+                srpm_for_rebuild,
+                results_dir,
+                target_os,
+                koji_recorded=koji_recorded_env,
+            )
+            rebuilds = vm_result["rebuilds"]
+            executor_details = vm_result["executor"]
+            if rebuilds and rebuilds[-1]["exit_code"] != 0:
+                _print_rebuild_failure_diagnosis(rebuilds[-1])
+        else:
+            rebuilds = []
+            for run_index in range(1, args.runs + 1):
+                resultdir = results_dir / f"result-run-{run_index}"
+                result = run_rebuild(active_mock_cfg, srpm_for_rebuild, resultdir, isolation=args.isolation)
+                result["run"] = run_index
+                rebuilds.append(result)
+                if result["exit_code"] != 0:
+                    _print_rebuild_failure_diagnosis(result)
+                    break
 
         successful = rebuilds and all(item["exit_code"] == 0 for item in rebuilds)
         repeatable = None
@@ -682,6 +640,7 @@ def run_koji_rpm_rebuild(args):
                     repo_probe=repo_probe,
                     mock_cfg=active_mock_cfg,
                     repo_fallback=repo_fallback,
+                    executor=executor_details,
                 ),
                 "rebuild": _rebuild_summary(
                     args,
@@ -720,6 +679,7 @@ def run_koji_rpm_rebuild(args):
                     repo_probe=repo_probe,
                     mock_cfg=active_mock_cfg,
                     repo_fallback=repo_fallback,
+                    executor=executor_details,
                 ),
                 "rebuild": _rebuild_summary(args, "failed", rebuilds=rebuilds),
                 "analysis": _analysis_summary(),

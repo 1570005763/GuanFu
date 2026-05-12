@@ -96,7 +96,18 @@ guanfu rebuild koji-rpm \
   --rpm-name zlib-1.2.13-3.an23.x86_64.rpm
 ```
 
-Koji RPM rebuild requires a Linux host with `koji`, `mock`, `rpm`, and `dnf`.
+Koji RPM rebuild requires a Linux host with `koji`, `createrepo_c`, and QEMU.
+The default Koji executor is `--executor vm`; it uses KVM when `/dev/kvm` is
+available and otherwise falls back to slow degraded QEMU TCG. Use
+`--vm-require-kvm` for strict trusted runs. The default an23 VM image is:
+`https://mirrors.openanolis.cn/anolis/23/isos/GA/x86_64/AnolisOS-23.4-x86_64.qcow2`.
+GuanFu checks host VM dependencies and reports install hints instead of
+installing system packages automatically. The host needs `qemu-img` and
+`virt-customize` to prepare the VM overlay. GuanFu uses QEMU 9p sharing when
+available, and falls back to `virt-copy-in` / `virt-copy-out` when the host QEMU
+lacks 9p support. By default the qcow2 overlay is prepared with `mock,rpm-build`
+before boot. Use `--executor local` only for host mock diagnostics or
+compatibility.
 
 ## Action Inputs
 

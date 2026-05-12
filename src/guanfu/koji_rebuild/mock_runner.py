@@ -1,4 +1,3 @@
-import os
 import subprocess
 import time
 from pathlib import Path
@@ -24,8 +23,6 @@ def _list_result_rpms(resultdir):
 def run_rebuild(mock_cfg, srpm, resultdir, isolation="simple"):
     resultdir = Path(resultdir)
     resultdir.mkdir(parents=True, exist_ok=True)
-    if os.environ.get("GUANFU_EXECUTOR_MODE") == "container" and os.environ.get("GUANFU_IN_CONTAINER") == "1":
-        resultdir.chmod(0o777)
     started = time.time()
     cmd = [
         "mock",
@@ -62,12 +59,11 @@ def _diagnose_mock_failure(resultdir):
         "summary": (
             "mock failed while executing programs or RPM scriptlets inside the buildroot. "
             "This can be caused by old buildroot userland being incompatible with the "
-            "current host/container CPU or kernel execution environment."
+            "current host CPU or kernel execution environment."
         ),
         "suggested_action": (
-            "Retry the same GuanFu command inside a Linux VM with a controlled CPU model "
-            "close to the Koji builder. Container and local executors still share the "
-            "host kernel/CPU exposure, so a VM may fix this class of failure."
+            "Retry with --executor vm and a Linux VM whose CPU model, kernel, and mock "
+            "version are close to the Koji builder."
         ),
         "evidence": evidence,
     }
