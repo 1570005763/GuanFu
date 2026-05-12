@@ -1,15 +1,17 @@
 # 本地重复构建指南
 
-本指南将介绍如何使用 GuanFu 在本地环境中基于指定的 `buildspec.yaml` 文件实现重复构建。
+本指南介绍如何使用 GuanFu 在本地运行两类 rebuild：基于 `buildspec.yaml` 的既有容器构建流程，以及基于 OpenAnolis Koji 发布 RPM 的本地 VM rebuild 流程。
 
 ## 前提条件
 
-在开始本地重复构建之前，请确保您已满足以下条件：
+运行 buildspec 容器 rebuild 前，请确保您已满足以下条件：
 
 1. 已安装 Docker
 2. 已安装 Python 3.6+
 3. 已安装 Git
 4. 已安装 YAML 解析器（PyYAML 包）
+
+运行 Koji RPM VM rebuild 还需要 Linux host，以及 `koji`、QEMU/libguestfs 工具链；当历史 repo 不存在并启用 installed-pkgs fallback 时，还需要 `createrepo_c`。macOS 不能原生运行 mock，建议使用 Linux VM 或远程 Linux 主机。
 
 ## 使用方法
 
@@ -74,8 +76,9 @@ guanfu rebuild koji-rpm \
 4. 从发布 source repo 获取 SRPM，并下载 Koji task SRPM/logs 做同源校验
 5. 使用 Koji `buildroot_id` 生成 `mock.cfg`
 6. 若历史 repo 不存在，使用 `installed_pkgs.log` 恢复临时本地 repo
-7. 通过 QEMU/KVM 启动 VM，将本次运行目录挂载到 VM 内，并在 VM 中执行 `mock --rebuild`
-8. 对比发布 RPM 和本地 rebuild RPM，并输出 `report.json`
+7. 通过 QEMU 启动 VM；KVM 可用时使用 KVM，否则降级到 TCG，并通过 9p 挂载或 `virt-copy-in` / `virt-copy-out` 交换本次运行目录
+8. 在 VM 中执行 `mock --rebuild`
+9. 对比发布 RPM 和本地 rebuild RPM，并输出 `report.json`
 
 如果需要保留当前 host 上直接运行 mock 的行为，可以显式使用 local executor：
 
@@ -136,7 +139,7 @@ invalid opcode
 Transaction failed（通常伴随 scriptlet signal 4/11）
 ```
 
-这类失败通常不表示 SRPM、`mock.cfg` 或依赖恢复一定有问题，而可能是本地执行环境和 Koji builder 的 CPU/kernel 边界不一致。默认 VM executor 会通过 KVM/QEMU 固定更接近 Koji builder 的 CPU model。当前 an23 实验中，`Cascadelake-Server-v1` VM 已验证可以让 `acl`、`bzip2`、`which` 这类 old an23 buildroot 正常完成 rebuild。
+这类失败通常不表示 SRPM、`mock.cfg` 或依赖恢复一定有问题，而可能是本地执行环境和 Koji builder 的 CPU/kernel 边界不一致。默认 VM executor 会通过 KVM/QEMU 固定更接近 Koji builder 的 CPU model。当前 an23 实验中，`Cascadelake-Server-v1` VM 已验证可以让 `acl`、`bzip2` 这类历史 repo 已失效的包通过 installed-pkgs fallback 正常完成 rebuild；`sqlite-libs` 在无 KVM 的 TCG 测试机上进入 `%check` 后触发 7200 秒 timeout，因此这类重包需要在有 KVM 的机器上复测。
 
 GuanFu 会在 mock 失败后读取 `root.log`、`build.log` 和 `state.log`。如果检测到上述旧 buildroot 运行时崩溃特征，`report.json` 的 `rebuild.failure_diagnosis` 会给出 `buildroot_runtime_incompatible` 诊断、证据行和 VM 重试建议。
 
@@ -203,5 +206,5 @@ binary RPM base URL: https://mirrors.openanolis.cn/anolis/23/os/x86_64/os/Packag
 host 侧需要 QEMU、`qemu-img`、`virt-customize`，如果 QEMU 不支持 9p 或显式使用 `image-copy`，
 还需要 `virt-copy-in` 和 `virt-copy-out`。an23 默认 qcow2 镜像来自 OpenAnolis GA mirror，会自动下载
 并缓存；VM overlay 内的 `mock,rpm-build` 会自动准备。host 侧还需要 `guanfu`、`koji` 和
-`createrepo_c` 用于准备输入或 installed-pkgs fallback。local executor 需要 Linux 环境，并在 host 上
+`createrepo_c` 用于 installed-pkgs fallback。local executor 需要 Linux 环境，并在 host 上
 安装这些工具；macOS 不能原生运行 local mock，需要使用 Linux 虚拟机或远程 Linux 主机。
