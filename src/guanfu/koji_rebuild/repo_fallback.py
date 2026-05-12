@@ -499,6 +499,9 @@ def rewrite_mock_config_for_local_repo(source_cfg, dest_cfg, repo_dir, releaseve
         rewritten += "config_opts['releasever'] = '%s'\n" % releasever
     if disable_bootstrap:
         rewritten += "\n# Local installed_pkgs fallback execution policy.\n"
+        rewritten += "# Currently scoped to historical-repo fallback only.\n"
+        rewritten += "# Future work may evaluate disabling mock bootstrap globally if broader\n"
+        rewritten += "# historical-repo tests keep the final buildroot package set stable.\n"
         rewritten += "config_opts['use_bootstrap'] = False\n"
         rewritten += "config_opts['use_bootstrap_image'] = False\n"
     dest_cfg.write_text(rewritten)
