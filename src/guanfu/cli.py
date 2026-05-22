@@ -31,9 +31,9 @@ def build_parser():
         "koji-rpm",
         help="Rebuild an RPM produced by a Koji instance",
         description=(
-            "Rebuild an RPM produced by a Koji instance. The default executor runs "
-            "mock inside a Linux VM with a controlled CPU model, kernel, and tool "
-            "surface close to the Koji builder. KVM is trusted; TCG fallback is degraded."
+            "Rebuild an RPM produced by a Koji instance. GuanFu selects a Koji profile "
+            "by default: OpenAnolis an23 keeps the VM executor, while generic Koji "
+            "instances use the local executor unless explicitly configured otherwise."
         ),
         epilog=(
             "VM guidance: --executor vm currently supports an23. By default GuanFu "
@@ -62,13 +62,35 @@ def build_parser():
         help="Koji topurl for repos and mock-config",
     )
     koji.add_argument(
+        "--koji-profile",
+        default="auto",
+        help="Koji profile used to select artifact URLs, mock config providers, and executor policy.",
+    )
+    koji.add_argument(
+        "--koji-profile-file",
+        action="append",
+        default=[],
+        help="YAML file containing declarative Koji profile definitions. Can be passed more than once.",
+    )
+    koji.add_argument(
+        "--koji-ca-cert",
+        default=os.environ.get("GUANFU_KOJI_CA_CERT"),
+        help="Custom CA bundle used for Koji XML-RPC and artifact downloads.",
+    )
+    koji.add_argument(
+        "--koji-insecure-ssl",
+        action="store_true",
+        default=os.environ.get("GUANFU_KOJI_INSECURE_SSL", "").lower() in ("1", "true", "yes", "on"),
+        help="Disable TLS certificate verification for Koji XML-RPC and artifact downloads.",
+    )
+    koji.add_argument(
         "--binary-rpm-base-url",
-        default="https://mirrors.openanolis.cn/anolis/23/os/x86_64/os/Packages/",
+        default=None,
         help="Base URL for published binary RPMs",
     )
     koji.add_argument(
         "--source-rpm-base-url",
-        default="https://mirrors.openanolis.cn/anolis/23/os/source/Packages/",
+        default=None,
         help="Base URL for published source RPMs",
     )
     koji.add_argument(
@@ -78,11 +100,11 @@ def build_parser():
     )
     koji.add_argument(
         "--executor",
-        choices=("vm", "local"),
-        default="vm",
+        choices=("auto", "vm", "local"),
+        default="auto",
         help=(
-            "Rebuild executor. vm is the default path; local keeps the host mock flow "
-            "for compatibility and diagnostics."
+            "Rebuild executor. auto follows the selected Koji profile; local keeps the "
+            "host mock flow for compatibility and diagnostics."
         ),
     )
     koji.add_argument(

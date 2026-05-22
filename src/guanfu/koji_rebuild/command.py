@@ -1,4 +1,5 @@
 import re
+import shutil
 import sys
 import time
 from datetime import datetime
@@ -15,8 +16,8 @@ from guanfu.koji_rebuild.vm_executor import (
     vm_executor_summary,
 )
 from guanfu.koji_rebuild.downloader import (
+    build_tls_config,
     download_task_output,
-    join_url,
     summarize_file,
     try_download_url,
 )
@@ -27,8 +28,15 @@ from guanfu.koji_rebuild.repo_fallback import (
     prepare_installed_pkgs_fallback,
     summarize_fallback_report,
 )
+from guanfu.koji_rebuild.profiles import select_koji_profile
 from guanfu.koji_rebuild.resolver import resolve_koji_build
 from guanfu.koji_rebuild.rpm_name import parse_rpm_filename, rpm_filename
+
+
+class MockConfigUnavailable(RuntimeError):
+    def __init__(self, errors):
+        self.errors = errors
+        super().__init__("mock config is unavailable: %s" % "; ".join(errors))
 
 
 def _safe_name(name):
@@ -52,7 +60,15 @@ def _run_dir(workdir, rpm_name):
 
 def _download_koji_logs(client, task_id, outputs, inputs_dir):
     downloads = []
-    for log_name in ("build.log", "root.log", "installed_pkgs.log", "mock_output.log", "hw_info.log", "state.log"):
+    for log_name in (
+        "build.log",
+        "root.log",
+        "installed_pkgs.log",
+        "mock_output.log",
+        "mock_config.log",
+        "hw_info.log",
+        "state.log",
+    ):
         if log_name in outputs:
             path = download_task_output(client, task_id, log_name, inputs_dir / log_name)
             downloads.append(summarize_file(path, label="koji_task_log"))
@@ -64,11 +80,48 @@ def _download_task_srpm(client, task_id, srpm_name, inputs_dir):
     return path, summarize_file(path, label="koji_task_srpm")
 
 
-def _download_published(url, dest, label):
-    path, error = try_download_url(url, dest)
+def _download_published(url, dest, label, ssl_context=None):
+    path, error = try_download_url(url, dest, ssl_context=ssl_context)
     if error:
         return None, {"label": label, "url": url, "error": error}
     return path, summarize_file(path, label=label, url=url)
+
+
+def _prepare_mock_config(profile, client, args, resolution, inputs_dir, mock_cfg):
+    errors = []
+    for provider in profile.mock_config_providers:
+        if provider == "task-output-mock-config":
+            source = inputs_dir / "mock_config.log"
+            if not source.exists() and "mock_config.log" in (resolution.outputs or {}):
+                try:
+                    source = download_task_output(
+                        client,
+                        resolution.buildarch_task["id"],
+                        "mock_config.log",
+                        source,
+                    )
+                except Exception as exc:
+                    errors.append("%s: %r" % (provider, exc))
+                    continue
+            if source.exists():
+                shutil.copyfile(str(source), str(mock_cfg))
+                return mock_cfg, {"provider": provider, "source_file": source.name}
+            errors.append("%s: mock_config.log not found in task output" % provider)
+            continue
+        if provider == "koji-cli":
+            try:
+                generate_mock_config(
+                    args.koji_server,
+                    args.koji_topurl,
+                    resolution.buildroot["id"],
+                    mock_cfg,
+                )
+                return mock_cfg, {"provider": provider}
+            except Exception as exc:
+                errors.append("%s: %r" % (provider, exc))
+            continue
+        errors.append("%s: unsupported mock config provider" % provider)
+    raise MockConfigUnavailable(errors)
 
 
 def _without_none(data):
@@ -109,12 +162,25 @@ def _build_environment_summary(
     mock_cfg=None,
     repo_fallback=None,
     executor=None,
+    profile=None,
+    profile_candidates=None,
+    artifact_locator=None,
+    mock_config_source=None,
+    executor_policy=None,
+    tls_mode=None,
 ):
     buildroot = resolution.buildroot if resolution else {}
     environment = {
         "executor": executor or _environment_executor_summary(args),
         "koji_server": args.koji_server,
         "koji_topurl": args.koji_topurl,
+        "koji_profile_id": profile.id if profile else None,
+        "profile_source": profile.source if profile else None,
+        "profile_candidates": profile_candidates,
+        "artifact_locator": artifact_locator,
+        "mock_config_source": mock_config_source,
+        "executor_policy": executor_policy,
+        "tls_mode": tls_mode,
         "buildroot_id": buildroot.get("id"),
         "buildroot_tag": buildroot.get("tag_name"),
         "buildroot_arch": buildroot.get("arch"),
@@ -312,7 +378,12 @@ def run_koji_rpm_rebuild(args):
         print("--runs must be >= 1", file=sys.stderr)
         return 2
 
-    executor = getattr(args, "executor", "vm")
+    requested_executor = getattr(args, "executor", "auto")
+    tls_config = build_tls_config(
+        [getattr(args, "koji_server", None), getattr(args, "koji_topurl", None)],
+        ca_cert=getattr(args, "koji_ca_cert", None),
+        insecure=getattr(args, "koji_insecure_ssl", False),
+    )
 
     run_dir = _run_dir(args.workdir, args.rpm_name)
     inputs_dir = run_dir / "inputs"
@@ -329,19 +400,40 @@ def run_koji_rpm_rebuild(args):
             "analysis_time": _analysis_time(),
         },
         "input_artifacts": {},
-        "build_environment": _build_environment_summary(args),
+        "build_environment": _build_environment_summary(args, tls_mode=tls_config.mode),
         "rebuild": _rebuild_summary(args, "started"),
         "analysis": _analysis_summary(),
     }
 
     try:
         rpm_info = parse_rpm_filename(args.rpm_name)
-        client = KojiClient(args.koji_server)
+        client = KojiClient(args.koji_server, ssl_context=tls_config.ssl_context)
         resolution = resolve_koji_build(client, rpm_info)
         target_rpm_name = rpm_filename(resolution.rpm)
-        target_os = detect_target_os(rpm_info, resolution.buildroot)
+        profile, profile_candidates = select_koji_profile(
+            getattr(args, "koji_profile", "auto"),
+            getattr(args, "koji_profile_file", None),
+            args,
+            rpm_info,
+            resolution,
+        )
+        target_os = profile.target_os or detect_target_os(rpm_info, resolution.buildroot)
+        executor = profile.resolve_executor(requested_executor)
+        executor_policy = {
+            "requested": requested_executor,
+            "selected": executor,
+            "profile_default": profile.executor_policy,
+            "supported_executors": profile.supported_executors,
+        }
 
-        if executor == "vm" and not is_supported_target_os(target_os):
+        unsupported_executor = not profile.supports_executor(executor)
+        unsupported_vm_target = executor == "vm" and not is_supported_target_os(target_os)
+        if unsupported_executor or unsupported_vm_target:
+            unsupported_executor_summary = (
+                vm_executor_summary(target_os=target_os)
+                if executor == "vm"
+                else {"mode": executor}
+            )
             report = {
                 "version": ASSESSMENT_VERSION,
                 "metadata": {
@@ -352,20 +444,28 @@ def run_koji_rpm_rebuild(args):
                 "build_environment": _build_environment_summary(
                     args,
                     resolution=resolution,
-                    executor=vm_executor_summary(target_os=target_os),
+                    executor=unsupported_executor_summary,
+                    profile=profile,
+                    profile_candidates=profile_candidates,
+                    executor_policy=executor_policy,
+                    tls_mode=tls_config.mode,
                 ),
                 "rebuild": _rebuild_summary(
                     args,
                     "unsupported",
-                    reason="only an23 Koji RPM rebuild is currently supported by the VM executor",
+                    reason=(
+                        "the selected Koji profile does not support executor %s" % executor
+                        if unsupported_executor
+                        else "only an23 Koji RPM rebuild is currently supported by the VM executor"
+                    ),
                 ),
                 "analysis": _analysis_summary(),
             }
             report.update(_unavailable_assessment("unsupported_target"))
             write_json(run_dir / "report.json", report)
             print(
-                "[guanfu] Unsupported Koji RPM target for VM executor: "
-                f"tag={resolution.buildroot.get('tag_name')!r}",
+                "[guanfu] Unsupported Koji RPM target for executor "
+                f"{executor!r}: profile={profile.id!r} tag={resolution.buildroot.get('tag_name')!r}",
                 file=sys.stderr,
             )
             return 3
@@ -376,23 +476,30 @@ def run_koji_rpm_rebuild(args):
         write_json(metadata_dir / "buildarch-task.json", resolution.buildarch_task)
         write_json(metadata_dir / "task-result.json", resolution.task_result)
 
-        repo_probe = probe_repodata(args.koji_topurl, resolution.buildroot)
+        repo_probe = probe_repodata(
+            args.koji_topurl,
+            resolution.buildroot,
+            ssl_context=tls_config.ssl_context,
+            repo_url_template=profile.repo_url_template,
+        )
         write_json(metadata_dir / "repo-probe.json", repo_probe)
 
-        published_rpm_url = join_url(args.binary_rpm_base_url, target_rpm_name)
+        published_rpm_url, binary_artifact_locator = profile.binary_rpm_url(args, resolution, target_rpm_name)
         published_rpm, published_rpm_summary = _download_published(
             published_rpm_url,
             inputs_dir / target_rpm_name,
             "published_rpm",
+            ssl_context=tls_config.ssl_context,
         )
         if not published_rpm:
             raise RuntimeError(f"failed to download published RPM: {published_rpm_summary}")
 
-        published_srpm_url = join_url(args.source_rpm_base_url, resolution.task_srpm_name)
+        published_srpm_url, source_artifact_locator = profile.source_rpm_url(args, resolution)
         published_srpm, published_srpm_summary = _download_published(
             published_srpm_url,
             inputs_dir / resolution.task_srpm_name,
             "published_srpm",
+            ssl_context=tls_config.ssl_context,
         )
 
         task_srpm, task_srpm_summary = _download_task_srpm(
@@ -422,14 +529,76 @@ def run_koji_rpm_rebuild(args):
         srpm_cross_check = compare_srpms(published_srpm, task_srpm)
 
         mock_cfg = inputs_dir / "mock.cfg"
-        generate_mock_config(
-            args.koji_server,
-            args.koji_topurl,
-            resolution.buildroot["id"],
-            mock_cfg,
-        )
+        try:
+            mock_cfg, mock_config_source = _prepare_mock_config(
+                profile,
+                client,
+                args,
+                resolution,
+                inputs_dir,
+                mock_cfg,
+            )
+        except MockConfigUnavailable as exc:
+            report = {
+                "version": ASSESSMENT_VERSION,
+                "metadata": {
+                    "package_name": target_rpm_name,
+                    "reference_url": published_rpm_url,
+                    "reference_sha256": published_rpm_summary.get("sha256"),
+                    "rebuild_sha256": None,
+                    "analysis_time": _analysis_time(),
+                },
+                "input_artifacts": _input_artifacts_summary(
+                    published_rpm_summary=published_rpm_summary,
+                    task_srpm_summary=task_srpm_summary,
+                    log_summaries=log_summaries,
+                    source_rpm_summary=source_rpm_summary,
+                    source_rpm_type=source_rpm_type,
+                    source_rpm_url=source_rpm_url,
+                    task_id=resolution.buildarch_task["id"],
+                    srpm_cross_check=srpm_cross_check,
+                ),
+                "build_environment": _build_environment_summary(
+                    args,
+                    resolution=resolution,
+                    repo_probe=repo_probe,
+                    profile=profile,
+                    profile_candidates=profile_candidates,
+                    artifact_locator={
+                        "binary": binary_artifact_locator,
+                        "source": source_artifact_locator,
+                    },
+                    mock_config_source={"status": "unavailable", "errors": exc.errors},
+                    executor_policy=executor_policy,
+                    tls_mode=tls_config.mode,
+                ),
+                "rebuild": _rebuild_summary(
+                    args,
+                    "skipped",
+                    reason="mock_config_unavailable",
+                    error=repr(exc),
+                ),
+                "analysis": _analysis_summary(),
+            }
+            report.update(_unavailable_assessment("mock_config_unavailable"))
+            write_json(run_dir / "report.json", report)
+            print("[guanfu] Mock config is unavailable", file=sys.stderr)
+            return 3
         active_mock_cfg = mock_cfg
         repo_fallback = None
+        artifact_locator_summary = {
+            "binary": binary_artifact_locator,
+            "source": source_artifact_locator,
+        }
+        environment_context = {
+            "profile": profile,
+            "profile_candidates": profile_candidates,
+            "artifact_locator": artifact_locator_summary,
+            "mock_config_source": mock_config_source,
+            "executor_policy": executor_policy,
+            "tls_mode": tls_config.mode,
+        }
+        selected_executor_summary = {"mode": executor}
 
         if repo_probe.get("status") != 200:
             if getattr(args, "repo_fallback", "installed-pkgs") == "none":
@@ -460,8 +629,9 @@ def run_koji_rpm_rebuild(args):
                         executor=(
                             vm_executor_summary(target_os=target_os, koji_recorded=koji_recorded_env)
                             if executor == "vm"
-                            else None
+                            else selected_executor_summary
                         ),
+                        **environment_context,
                     ),
                     "rebuild": _rebuild_summary(
                         args,
@@ -504,6 +674,7 @@ def run_koji_rpm_rebuild(args):
                         run_dir / "fallback-repo",
                         metadata_dir,
                         resolution.buildarch_task["id"],
+                        ssl_context=tls_config.ssl_context,
                     )
                 except Exception as exc:
                     repo_fallback = {
@@ -558,8 +729,9 @@ def run_koji_rpm_rebuild(args):
                         executor=(
                             vm_executor_summary(target_os=target_os, koji_recorded=koji_recorded_env)
                             if executor == "vm"
-                            else None
+                            else selected_executor_summary
                         ),
+                        **environment_context,
                     ),
                     "rebuild": _rebuild_summary(
                         args,
@@ -578,7 +750,7 @@ def run_koji_rpm_rebuild(args):
 
             active_mock_cfg = inputs_dir / "mock-fallback-installed-pkgs.cfg"
 
-        executor_details = None
+        executor_details = selected_executor_summary if executor == "local" else None
         if executor == "vm":
             vm_result = run_vm_rebuild(
                 args,
@@ -594,6 +766,58 @@ def run_koji_rpm_rebuild(args):
             if rebuilds and rebuilds[-1]["exit_code"] != 0:
                 _print_rebuild_failure_diagnosis(rebuilds[-1])
         else:
+            if not shutil.which("mock"):
+                executor_details = {
+                    "mode": "local",
+                    "preflight": {
+                        "checks": [
+                            {
+                                "name": "mock",
+                                "status": "missing",
+                                "hint": "Install mock before using the local Koji rebuild executor.",
+                            }
+                        ]
+                    },
+                }
+                report = {
+                    "version": ASSESSMENT_VERSION,
+                    "metadata": {
+                        "package_name": target_rpm_name,
+                        "reference_url": published_rpm_url,
+                        "reference_sha256": published_rpm_summary.get("sha256"),
+                        "rebuild_sha256": None,
+                        "analysis_time": _analysis_time(),
+                    },
+                    "input_artifacts": _input_artifacts_summary(
+                        published_rpm_summary=published_rpm_summary,
+                        task_srpm_summary=task_srpm_summary,
+                        log_summaries=log_summaries,
+                        source_rpm_summary=source_rpm_summary,
+                        source_rpm_type=source_rpm_type,
+                        source_rpm_url=source_rpm_url,
+                        task_id=resolution.buildarch_task["id"],
+                        srpm_cross_check=srpm_cross_check,
+                    ),
+                    "build_environment": _build_environment_summary(
+                        args,
+                        resolution=resolution,
+                        repo_probe=repo_probe,
+                        mock_cfg=active_mock_cfg,
+                        repo_fallback=repo_fallback,
+                        executor=executor_details,
+                        **environment_context,
+                    ),
+                    "rebuild": _rebuild_summary(
+                        args,
+                        "skipped",
+                        reason="local mock executable is not available",
+                    ),
+                    "analysis": _analysis_summary(),
+                }
+                report.update(_unavailable_assessment("mock_tool"))
+                write_json(run_dir / "report.json", report)
+                print("[guanfu] Local executor requires mock", file=sys.stderr)
+                return 3
             rebuilds = []
             for run_index in range(1, args.runs + 1):
                 resultdir = results_dir / f"result-run-{run_index}"
@@ -641,6 +865,7 @@ def run_koji_rpm_rebuild(args):
                     mock_cfg=active_mock_cfg,
                     repo_fallback=repo_fallback,
                     executor=executor_details,
+                    **environment_context,
                 ),
                 "rebuild": _rebuild_summary(
                     args,
@@ -680,6 +905,7 @@ def run_koji_rpm_rebuild(args):
                     mock_cfg=active_mock_cfg,
                     repo_fallback=repo_fallback,
                     executor=executor_details,
+                    **environment_context,
                 ),
                 "rebuild": _rebuild_summary(args, "failed", rebuilds=rebuilds),
                 "analysis": _analysis_summary(),

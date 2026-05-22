@@ -5,20 +5,27 @@ import urllib.request
 from pathlib import Path
 
 
-def historical_repo_url(koji_topurl, buildroot):
+def historical_repo_url(koji_topurl, buildroot, repo_url_template=None):
     topurl = koji_topurl.rstrip("/")
+    if repo_url_template:
+        values = dict(buildroot or {})
+        values["topurl"] = topurl
+        return repo_url_template.format(**values)
     return (
         f"{topurl}/repos/{buildroot['tag_name']}/"
         f"{buildroot['repo_id']}/{buildroot['arch']}"
     )
 
 
-def probe_repodata(koji_topurl, buildroot):
-    repo_url = historical_repo_url(koji_topurl, buildroot)
+def probe_repodata(koji_topurl, buildroot, ssl_context=None, repo_url_template=None):
+    repo_url = historical_repo_url(koji_topurl, buildroot, repo_url_template=repo_url_template)
     repomd_url = f"{repo_url}/repodata/repomd.xml"
     try:
         request = urllib.request.Request(repomd_url, method="GET")
-        with urllib.request.urlopen(request, timeout=20) as response:
+        kwargs = {"timeout": 20}
+        if ssl_context is not None:
+            kwargs["context"] = ssl_context
+        with urllib.request.urlopen(request, **kwargs) as response:
             response.read(64)
             return {"url": repomd_url, "status": response.status}
     except urllib.error.HTTPError as exc:

@@ -1,10 +1,29 @@
 import base64
 import hashlib
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
 import xmlrpc.client
 from pathlib import Path
+
+
+class TLSConfig:
+    def __init__(self, mode, ssl_context=None):
+        self.mode = mode
+        self.ssl_context = ssl_context
+
+
+def build_tls_config(urls, ca_cert=None, insecure=False):
+    urls = [url for url in (urls or []) if url]
+    uses_https = any(urllib.parse.urlparse(str(url)).scheme == "https" for url in urls)
+    if not uses_https:
+        return TLSConfig("plain-http")
+    if insecure:
+        return TLSConfig("insecure", ssl._create_unverified_context())
+    if ca_cert:
+        return TLSConfig("custom-ca", ssl.create_default_context(cafile=str(ca_cert)))
+    return TLSConfig("system-ca", ssl.create_default_context())
 
 
 def sha256_file(path):
@@ -36,11 +55,14 @@ def join_url(base_url, filename):
     return urllib.parse.urljoin(base_url, urllib.parse.quote(filename))
 
 
-def download_url(url, dest):
+def download_url(url, dest, ssl_context=None):
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     request = urllib.request.Request(url, headers={"User-Agent": "guanfu-koji-rebuild/0.1"})
-    with urllib.request.urlopen(request, timeout=60) as response:
+    kwargs = {"timeout": 60}
+    if ssl_context is not None:
+        kwargs["context"] = ssl_context
+    with urllib.request.urlopen(request, **kwargs) as response:
         with open(dest, "wb") as f:
             while True:
                 chunk = response.read(1024 * 1024)
@@ -50,9 +72,9 @@ def download_url(url, dest):
     return dest
 
 
-def try_download_url(url, dest):
+def try_download_url(url, dest, ssl_context=None):
     try:
-        return download_url(url, dest), None
+        return download_url(url, dest, ssl_context=ssl_context), None
     except urllib.error.HTTPError as exc:
         return None, f"HTTP {exc.code}: {exc.reason}"
     except Exception as exc:
