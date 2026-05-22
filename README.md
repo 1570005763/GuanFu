@@ -99,10 +99,23 @@ guanfu rebuild koji-rpm \
   --rpm-name zlib-1.2.13-3.an23.x86_64.rpm
 ```
 
-Koji RPM rebuild currently supports an23 RPMs and requires a Linux host with
-`koji` plus QEMU/libguestfs tooling. `createrepo_c` is required when GuanFu must
-reconstruct a temporary repo from `installed_pkgs.log`.
-The default Koji executor is `--executor vm`; it uses KVM when `/dev/kvm` is
+Rebuild from a standard Koji instance by selecting the generic profile:
+
+```bash
+guanfu rebuild koji-rpm \
+  --koji-profile generic-koji \
+  --koji-server http://koji-internal.jinzihao.me/kojihub \
+  --koji-topurl http://koji-internal.jinzihao.me/kojifiles \
+  --rpm-name anothertest-1.0.0-21.al8.x86_64.rpm
+```
+
+Koji RPM rebuild requires a Linux host with `koji`. The default executor is
+profile-driven: OpenAnolis an23 uses `vm`, while generic Koji uses `local`.
+Generic Koji profiles use `mock_config.log` from task output when available,
+falling back to `koji mock-config` if needed. The an23 VM executor also
+requires QEMU/libguestfs tooling. `createrepo_c` is required when GuanFu must
+reconstruct a temporary repo from `installed_pkgs.log`. The an23 VM executor
+uses KVM when `/dev/kvm` is
 available and otherwise falls back to slow degraded QEMU TCG. Use
 `--vm-require-kvm` for strict trusted runs. The default an23 VM image is:
 `https://mirrors.openanolis.cn/anolis/23/isos/GA/x86_64/AnolisOS-23.4-x86_64.qcow2`.

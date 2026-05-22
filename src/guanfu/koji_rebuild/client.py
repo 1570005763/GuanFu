@@ -2,9 +2,12 @@ import xmlrpc.client
 
 
 class KojiClient:
-    def __init__(self, server_url):
+    def __init__(self, server_url, ssl_context=None):
         self.server_url = server_url
-        self.session = xmlrpc.client.ServerProxy(server_url, allow_none=True)
+        kwargs = {"allow_none": True}
+        if ssl_context is not None and server_url.startswith("https://"):
+            kwargs["context"] = ssl_context
+        self.session = xmlrpc.client.ServerProxy(server_url, **kwargs)
 
     def get_rpm(self, rpm_info):
         return self.session.getRPM(rpm_info, True, False)

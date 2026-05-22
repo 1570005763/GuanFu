@@ -64,8 +64,8 @@ def _url_join(base, href):
     return urllib.parse.urljoin(base, href)
 
 
-def _download_metadata(url, dest):
-    path = download_url(url, dest)
+def _download_metadata(url, dest, ssl_context=None):
+    path = download_url(url, dest, ssl_context=ssl_context)
     return summarize_file(path, label="external_repo_metadata", url=url)
 
 
@@ -227,7 +227,7 @@ def _repo_event(buildroot):
     return buildroot.get("repo_create_event_id") or buildroot.get("create_event_id")
 
 
-def _external_repo_metadata(client, buildroot, metadata_dir):
+def _external_repo_metadata(client, buildroot, metadata_dir, ssl_context=None):
     event = _repo_event(buildroot)
     repos = client.get_external_repo_list(buildroot["tag_name"], event)
     arch = buildroot["arch"]
@@ -241,10 +241,10 @@ def _external_repo_metadata(client, buildroot, metadata_dir):
         item["resolved_url"] = base_url
         try:
             repomd_url = _url_join(base_url, "repodata/repomd.xml")
-            repomd = _download_metadata(repomd_url, repo_dir / "repomd.xml")
+            repomd = _download_metadata(repomd_url, repo_dir / "repomd.xml", ssl_context=ssl_context)
             primary_info = _find_primary_location(repo_dir / "repomd.xml")
             primary_url = _url_join(base_url, primary_info["href"])
-            primary = _download_metadata(primary_url, repo_dir / Path(primary_info["href"]).name)
+            primary = _download_metadata(primary_url, repo_dir / Path(primary_info["href"]).name, ssl_context=ssl_context)
             item["repomd"] = repomd
             item["primary"] = primary
             item["primary_info"] = primary_info
@@ -270,8 +270,8 @@ def _find_external_package(repo_metadata, entry):
     return None, None
 
 
-def _recover_external_rpms(client, buildroot, entries, repo_dir, metadata_dir):
-    repo_metadata = _external_repo_metadata(client, buildroot, metadata_dir)
+def _recover_external_rpms(client, buildroot, entries, repo_dir, metadata_dir, ssl_context=None):
+    repo_metadata = _external_repo_metadata(client, buildroot, metadata_dir, ssl_context=ssl_context)
     report = {
         "status": "ready",
         "event_id": _repo_event(buildroot),
@@ -295,7 +295,7 @@ def _recover_external_rpms(client, buildroot, entries, repo_dir, metadata_dir):
         artifact = downloaded_cache.get(source_url)
         if artifact is None:
             try:
-                download_url(source_url, path)
+                download_url(source_url, path, ssl_context=ssl_context)
                 artifact = summarize_file(path, label="recovered_external_rpm", url=source_url)
                 artifact["source_type"] = "external_repo"
                 artifact["external_repo_name"] = repo["external_repo_name"]
@@ -636,6 +636,7 @@ def prepare_installed_pkgs_fallback(
     repo_dir,
     metadata_dir,
     source_task_id,
+    ssl_context=None,
 ):
     installed_pkgs_log = Path(installed_pkgs_log)
     repo_dir = Path(repo_dir)
@@ -712,6 +713,7 @@ def prepare_installed_pkgs_fallback(
             unresolved_by_getrpm,
             repo_dir,
             metadata_dir,
+            ssl_context=ssl_context,
         )
         for item in external_resolved:
             parsed = _parse_nevra(item["entry"]["rpm_lookup"])

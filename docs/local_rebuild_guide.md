@@ -68,6 +68,25 @@ guanfu rebuild koji-rpm \
 
 `koji-rpm` 默认走 VM 执行器。当前 VM 执行器只支持 an23 RPM；如果 Koji buildroot tag 或 RPM release 不能识别为 an23，GuanFu 会返回 `unsupported`，后续 an8、alinux3、alinux4 等发行版会由未来的 policy 模块接入。
 
+当前 `koji-rpm` 通过 profile 决定 artifact URL、mock config 来源和 executor。默认
+`--koji-profile auto` 会优先匹配 OpenAnolis an23，否则落到 `generic-koji`。`generic-koji`
+适用于标准 Koji 实例：RPM/SRPM 默认从 `--koji-topurl` 的 `packages/` 目录派生，
+mock 配置优先使用 buildArch task output 里的 `mock_config.log`，executor 默认使用
+`local`。
+
+例如验证一个普通 Koji 实例：
+
+```bash
+guanfu rebuild koji-rpm \
+  --koji-profile generic-koji \
+  --koji-server http://koji-internal.jinzihao.me/kojihub \
+  --koji-topurl http://koji-internal.jinzihao.me/kojifiles \
+  --rpm-name anothertest-1.0.0-21.al8.x86_64.rpm
+```
+
+如果 Koji 使用内部 CA，可以通过 `--koji-ca-cert PATH` 指定 CA；仅用于诊断时也可以使用
+`--koji-insecure-ssl` 跳过证书校验。
+
 默认流程会：
 
 1. 根据 RPM 名称查询 OpenAnolis Koji，定位 buildroot 和构建任务
