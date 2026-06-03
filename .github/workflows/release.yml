@@ -318,16 +318,16 @@ jobs:
               exit 1
             fi
             jq -n \
-              --argfile releasePayload release-manifest/release_payload.json \
-              --argfile dsse release-manifest/release.dsse.json \
-              --argfile rekor release-manifest/rekor-v1-entry.json \
-              '{releasePayload:$releasePayload,dsseEnvelope:$dsse,rekorEntryV1:$rekor}' \
+              --slurpfile releasePayload release-manifest/release_payload.json \
+              --slurpfile dsse release-manifest/release.dsse.json \
+              --slurpfile rekor release-manifest/rekor-v1-entry.json \
+              '{releasePayload:$releasePayload[0],dsseEnvelope:$dsse[0],rekorEntryV1:$rekor[0]}' \
               > "release-manifest/${BUNDLE_NAME}"
           else
             jq -n \
-              --argfile releasePayload release-manifest/release_payload.json \
-              --argfile dsse release-manifest/release.dsse.json \
-              '{releasePayload:$releasePayload,dsseEnvelope:$dsse}' \
+              --slurpfile releasePayload release-manifest/release_payload.json \
+              --slurpfile dsse release-manifest/release.dsse.json \
+              '{releasePayload:$releasePayload[0],dsseEnvelope:$dsse[0]}' \
               > "release-manifest/${BUNDLE_NAME}"
           fi
 
