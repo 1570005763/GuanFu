@@ -134,6 +134,8 @@ if [ -n "$OUTPUT_PATHS" ]; then
     done <<< "$OUTPUT_PATHS"
 fi
 
+ENV_ARGS="-e GUANFU_RPM_SOURCE_PAYLOAD"
+
 # 获取BUILD_SPEC_FILE绝对路径
 [[ "$BUILD_SPEC_FILE" != /* ]] && BUILD_SPEC_FILE="$PWD/$BUILD_SPEC_FILE"
 
@@ -144,11 +146,12 @@ echo "  Running build in container: $CONTAINER_IMAGE"
 echo "  Build spec file: $BUILD_SPEC_FILE"
 echo "  Input mounts: $INPUT_MOUNTS"
 echo "  Output mounts: $OUTPUT_MOUNTS"
+echo "  Env args: $ENV_ARGS"
 echo "==========================================="
 
 # docker run --rm $OUTPUT_MOUNTS -v "$BUILD_SPEC_FILE:/opt/build-system/buildspec.yaml" -v "$SCRIPT_DIR:/opt/build-system/scripts" "$CONTAINER_IMAGE" \
 #     /bin/bash -c "cd /opt/build-system && python3 scripts/run_build.py buildspec.yaml"
-docker run --rm $INPUT_MOUNTS $OUTPUT_MOUNTS \
+docker run --rm $INPUT_MOUNTS $OUTPUT_MOUNTS $ENV_ARGS \
   -v "$BUILD_SPEC_FILE:/opt/build-system/buildspec.yaml" \
   -v "$SCRIPT_DIR:/opt/build-system/scripts" \
   "$CONTAINER_IMAGE" \

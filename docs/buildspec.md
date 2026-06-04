@@ -45,6 +45,12 @@ environment:
       version: "1.1.1k"
     - name: "zlib-devel"
       version: "1.2.11"
+    - name: "rpm-build"
+      version: "4.14.3-32.0.1.1.al8"
+    - name: "rpm-libs"
+      version: "4.14.3-32.0.1.1.al8"
+    - name: "zlib"
+      version: "1.2.11-20.9.al8.alnx"
   tools:
     - name: "node"
       version: "18.x"
@@ -171,6 +177,33 @@ environment:
 
 - 在非 Anolis 23 OS 下，当前版本的 runner 会直接报错（未实现）。
 
+对于 RPM 可重复构建，建议显式声明并固定压缩相关工具链：
+
+```yaml
+environment:
+  systemPackages:
+    - name: "rpm-build"
+      version: "4.14.3-32.0.1.1.al8"
+    - name: "rpm-libs"
+      version: "4.14.3-32.0.1.1.al8"
+    - name: "zlib"
+      version: "1.2.11-20.9.al8.alnx"
+    - name: "xz-libs"
+      version: "..."
+    - name: "libzstd"
+      version: "..."
+```
+
+Runner 会在安装完成后校验 buildspec 中声明了 `version` 的压缩工具链 RPM 包实际安装版本是否一致，并记录：
+
+```bash
+rpm --version
+rpm --showrc
+rpm -q rpm-build rpm-libs zlib xz-libs libzstd zstd
+```
+
+这些信息用于确认 RPM payload 压缩实现没有随镜像或仓库漂移。
+
 ### `tools`
 
 - 一个对象列表，每个对象包含工具的名称和版本。
@@ -256,8 +289,41 @@ outputs:
   - 检查指定路径的文件/目录是否存在
   - 如有 `sha256`，则计算文件哈希并与提供的值进行比较
   - 将输出文件/目录的信息记录到构建日志中，供后续流程使用
+  - 对 `.src.rpm` 输出读取 `PAYLOADCOMPRESSOR/PAYLOADFLAGS`，确认 GuanFu 内置的 RPM source payload 策略已生效
 
 在使用 `build-runner.sh` 脚本进行本地构建时，脚本会自动解析 `outputs` 部分，并将相应的目录挂载到容器中，确保构建产物能够正确地保存到宿主机上。
+
+---
+
+## GuanFu 内置 RPM source payload 策略
+
+GuanFu runner 内置 RPM source payload 策略：
+
+```rpm
+%_source_payload w9.gzdio
+```
+
+这表示 SRPM payload 使用 gzip level 9。构建完成后，Runner 会对声明在 `outputs` 中的 `.src.rpm` 执行：
+
+```bash
+rpm -qp --queryformat '%{PAYLOADCOMPRESSOR}\n%{PAYLOADFLAGS}\n' <src.rpm>
+```
+
+默认期望值为：
+
+```text
+PAYLOADCOMPRESSOR=gzip
+PAYLOADFLAGS=9
+```
+
+调试或灰度时可通过环境变量回退：
+
+```bash
+GUANFU_RPM_SOURCE_PAYLOAD=w.ufdio          # 使用近期无压缩 workaround
+GUANFU_RPM_SOURCE_PAYLOAD=system-default  # 不注入 %_source_payload，只记录实际值
+```
+
+`build-runner.sh` 会将宿主机上的 `GUANFU_RPM_SOURCE_PAYLOAD` 透传到构建容器中。
 
 ---
 
